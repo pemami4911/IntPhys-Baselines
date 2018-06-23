@@ -6,6 +6,7 @@ import os
 import math
 
 import utils
+from tqdm import tqdm
 
 class IntPhys(torch.utils.data.Dataset):
 

@@ -10,16 +10,21 @@ import models
 import datasets
 import utils
 
+from tqdm import tqdm
+
 opt = option.make(argparse.ArgumentParser())
+opt.nbatch_train = opt.bsz
+opt.nbatch_val = opt.bsz
+
 trainLoader = torch.utils.data.DataLoader(
-    datasets.IntPhys(opt, 'train'),
-    opt.bsz,
+    datasets.IntPhys(opt, 'paths_train'),
+    opt.nbatch_train,
     num_workers=opt.nThreads,
     shuffle=True
 )
 valLoader = torch.utils.data.DataLoader(
-    datasets.IntPhys(opt, 'val'),
-    opt.bsz,
+    datasets.IntPhys(opt, 'paths_val'),
+    opt.nbatch_val,
     num_workers=opt.nThreads,
     shuffle=True
 )
@@ -91,12 +96,12 @@ try:
                 loss_train = process_batch(batch, loss_train, i, k, 'train', t0)
                 t_optim += time.time() - t
             for key, value in loss_train.items():
-                log[i][j]['train_' + key] = np.mean(value[-opt.nbatch_train:])
+                log[i][j]['train_' + key] = float(np.mean(value[-opt.nbatch_train:]))
             for k, batch in zip(vs, valLoader):
                 loss_val = process_batch(batch, loss_val, i, k, 'val', t0)
                 t_optim += time.time() - t
             for key, value in loss_val.items():
-                log[i][j]['val_' + key] = np.mean(value[-opt.nbatch_val:])
+                log[i][j]['val_' + key] = float(np.mean(value[-opt.nbatch_val:]))
             utils.checkpoint('%d_%d' %(i, j), model, log, opt)
             log[i][j]['time(optim)'] = '%.2f(%.2f)' %(time.time() - t0, t_optim)
             print(log[i][j])

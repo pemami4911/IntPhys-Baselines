@@ -8,7 +8,7 @@ def make(parser):
     parser: parser object used to build opt
     """
     parser.add_argument('--model', default='Resnet_ae', help='model to train')
-    parser.add_argument('--list', type=str, default='lists/intphys2017')
+    parser.add_argument('--list', type=str, default='lists')
     parser.add_argument('--count', type=int, default=15000)
     parser.add_argument('--pattern', default='/mnt/20170407/train/%05d_block_O1_train',)
     parser.add_argument('--checkpoint', default='./checkpoints', help='path to checkpoint folder')
@@ -26,7 +26,7 @@ def make(parser):
     parser.add_argument('--px', default=0.5)
     parser.add_argument('--p_red', type=float, default=0, help='In case of semantic mask, probability to return a mask with only background. This is usefull for the discriminator of the GAN, because there are movies with no objects in the test set (and not in the training set)')
     parser.add_argument('--manualSeed', type=int, default=1)
-    parser.add_argument('--nThreads', type=int, default=20, help='Number of threads used to load and process images')
+    parser.add_argument('--nThreads', type=int, default=4, help='Number of threads used to load and process images')
     parser.add_argument('--num_channels', type=int, default=3, help='Number of channels in images')
     parser.add_argument('--frame_height', type=int, default=64)
     parser.add_argument('--frame_width', type=int, default=64)

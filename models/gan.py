@@ -220,13 +220,13 @@ class Gan(Model):
                 'nc_in': opt.nc_in,
                 'nc_out': opt.nc_out,
                 'nf': opt.nf,
-                'latentDim': 128,
+                'latentDim': 512,
                 'instanceNorm': False,
                 'middleNL': opt.middleNL,
                 'bsz': None,
                 'maskPredictor': None,
-                'lr': None,
-                'beta1': None,
+                'lr': 0.,
+                'beta1': 0.,
             }
             optmp = utils.to_namespace(optmp)
             self.inputMaskPredictor = Resnet_ae(
@@ -276,8 +276,10 @@ class Gan(Model):
             self.target.data.fill_(0)
             self.target.data[0].fill_(1)
         else:
-            self.input.data.copy_(batch[0])
-            self.target.data.copy_(batch[1])
+            tmp_input = batch[0].view(batch[0].shape[0] * batch[0].shape[1], \
+                    batch[0].shape[2], batch[0].shape[3], batch[0].shape[4])
+            self.input.data.copy_(tmp_input)
+            self.target.data.copy_(batch[1].squeeze())
             if self.inputMaskPredictor:
                 self.input = self.inputMaskPredictor(self.input).detach()
             if self.targetMaskPredictor:
