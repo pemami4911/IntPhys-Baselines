@@ -18,6 +18,7 @@ class IntPhys(torch.utils.data.Dataset):
             self.file = os.path.join(opt.list, split + '.npy')
             self.paths = np.load(self.file).tolist()
             count = min(opt.count, len(self.paths)) * self.opt.m
+            #count = min(opt.count, len(self.paths))
         else:
             self.pattern = opt.pattern
             count = opt.count * opt.m

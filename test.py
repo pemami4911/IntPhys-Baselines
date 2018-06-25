@@ -13,12 +13,13 @@ import option
 import models
 import datasets
 import utils
+import pdb
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--load', action='append',
                     type=lambda kv: kv.split("="), dest='load')
 parser.add_argument('--opt_file', type=str)
-parser.add_argument('--list_path', type=str, default='lists/3d_test')
+parser.add_argument('--list_path', type=str, default='lists')
 parser.add_argument('--load_scores', nargs='+',  default=None)
 parser.add_argument('--list_name', nargs='+',  default=['visible_dynamic_1_nObj1', 'visible_dynamic_1_nObj2', 'visible_dynamic_1_nObj3', 'visible_dynamic_2_nObj1', 'visible_dynamic_2_nObj2', 'visible_dynamic_2_nObj3', 'visible_static_nObj1', 'visible_static_nObj2', 'visible_static_nObj3', 'occluded_dynamic_1_nObj1', 'occluded_dynamic_1_nObj2', 'occluded_dynamic_1_nObj3', 'occluded_dynamic_2_nObj1', 'occluded_dynamic_2_nObj2', 'occluded_dynamic_2_nObj3', 'occluded_static_nObj1', 'occluded_static_nObj2', 'occluded_static_nObj3'])
 parser.add_argument('--name', default='test')
@@ -33,7 +34,7 @@ parser.add_argument('--manualSeed', type=int, default=1)
 parser.add_argument('--eval', action='store_true')
 parser.add_argument('--gpu', action='store_true')
 parser.add_argument('--nThreads', type=int, default=20)
-parser.add_argument('--count', type=int, default=25)
+parser.add_argument('--count', type=int, default=900)
 parser.add_argument('--mask_object', nargs='+', default=['object', 'occluder'])
 opt_test = parser.parse_args()
 opt_test.name += '_' + time.strftime('%y%m%d_%H%M%S')
@@ -74,7 +75,6 @@ def process_batch(batch, j, t0):
     j: index of the video
     t0: time when the test started
     """
-
     nbatch = vars(opt)['nbatch_test']
     frame_scores = np.zeros((opt.m, 4))
     d3, d4 = batch[0].size(3), batch[0].size(4)
@@ -138,7 +138,7 @@ def relative_acc(scores, labels):
     mean_imp = (scores * np.logical_not(labels)).mean(1)
     return (np.mean(mean_pos > mean_imp) + np.mean(mean_pos >= mean_imp)) / 2
 
-def test(list_name):
+def test(list_name=''):
     """Performs the test for a given set of videos.
 
     list_name: path to the subfolder (in opt_test.list_path) containing
@@ -152,7 +152,8 @@ def test(list_name):
         scores_mean = np.array(scores_mean).mean(0)
         scores_min = np.array(scores_min).mean(0)
     else:
-        opt.list = os.path.join(opt_test.list_path, list_name)
+        #opt.list = os.path.join(opt_test.list_path, list_name)
+        opt.list = opt_test.list_path
         testLoader = torch.utils.data.DataLoader(
             datasets.IntPhys(opt, 'test'),
             opt.bsz,
@@ -160,7 +161,7 @@ def test(list_name):
             shuffle=False
         )
         t0 = dt.time()
-        for j, batch in enumerate(testLoader, 0):
+        for j, batch in enumerate(testLoader):
             frame_scores = process_batch(batch, j, t0)
             scores_mean.append(frame_scores.mean(0))
             scores_min.append(frame_scores.min(0))
@@ -194,11 +195,12 @@ if opt_test.load:
 with open(os.path.join(cp_path, 'opt_test.txt'), 'w') as f:
     json.dump(vars(opt_test), f)
 results = {}
-for list_name in opt_test.list_name:
-    res = test(list_name)
-    print(list_name)
-    print(res)
-    results[list_name] = res
+#for list_name in opt_test.list_name:
+#    res = test(list_name)
+#    print(list_name)
+#    print(res)
+#    results[list_name] = res
+res = test()
 with open(os.path.join(cp_path, 'results.txt'), 'w') as f:
     json.dump(results, f)
 

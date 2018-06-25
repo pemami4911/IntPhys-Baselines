@@ -355,14 +355,14 @@ class Gan(Model):
 
     def load(self, d):
         for e in d:
-            if e[0] == 'netG':
-                path = e[1]
+            if 'netG' in e[0]:
+                path = e[0]
                 print('loading netG: %s' %path)
-                self.netG.load_state_dict(torch.load(e[1]))
-            if e[0] == 'netD':
-                path = e[1]
+                self.netG.load_state_dict(torch.load(path))
+            if 'netD' in e[0]:
+                path = e[0]
                 print('loading netD: %s' %path)
-                self.netD.load_state_dict(torch.load(e[1]))
+                self.netD.load_state_dict(torch.load(path))
 
     def score(self, batch):
         self.input.data.copy_(batch[0])

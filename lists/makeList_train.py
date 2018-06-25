@@ -2,6 +2,7 @@ import argparse
 import os
 import numpy as np
 import math
+import pdb
 
 def makeList(opt):
     video_paths = []
