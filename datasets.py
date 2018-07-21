@@ -7,6 +7,7 @@ import math
 
 import utils
 from tqdm import tqdm
+from point_cloud import Depth2BEV
 
 class IntPhys(torch.utils.data.Dataset):
 
@@ -14,6 +15,7 @@ class IntPhys(torch.utils.data.Dataset):
         self.opt = opt
         self.index = 0
         self.test = split == 'test'
+        self.depth2bev = Depth2BEV()
         if opt.list:
             self.file = os.path.join(opt.list, split + '.npy')
             self.paths = np.load(self.file).tolist()
@@ -29,11 +31,68 @@ class IntPhys(torch.utils.data.Dataset):
         self.count = count - (count % opt.bsz)
         vars(opt)['nbatch_%s' %split] = int(count / opt.bsz)
         print('n_sample_%s: %s' %(split, self.count))
+        self.last_offsets = None
 
     def __getitem__(self, index):
         video_idx = math.floor(index / self.opt.m)
         video_path = self._getpath(video_idx)
         frame_idx = index % self.opt.m
+        
+        def loadBEV(idx, label):
+            # The output BEV prediction maps is downsampled
+            # by some amount
+            pixor_downsample = 4
+            idx += 1
+            if not label:
+                # this cast to np.float32 is very important...
+                depth_img = np.float32(scipy.misc.imread(
+                    '%s/depth/depth_%03d.png' %(video_path, idx)))
+                # uses the fixed depth, not the actual max depth
+                # need to rescale objects
+                pc = self.depth2bev.depth_2_point_cloud(depth_img)
+                # Note that this BEV map is already in PyTorch CHW format
+                bev, offsets = self.depth2bev.point_cloud_2_BEV(pc)
+                self.last_offsets = offsets
+                return bev
+            else:
+                with open('%s/annotations/%03d.txt' %(video_path, idx), 'r') as f:
+                    max_depth = float(f.readline())
+                    # 87
+                    grid_x = int(np.ceil((self.depth2bev.bev_x_dim / self.depth2bev.bev_x_res) / pixor_downsample))
+                    # 63
+                    grid_y = int(np.ceil((self.depth2bev.bev_y_dim / self.depth2bev.bev_y_res) / pixor_downsample))
+                    # 9
+                    grid_z = int(np.ceil(self.depth2bev.bev_z_channels / pixor_downsample))
+                    # Use H x W for easy integration with PyTorch
+                    binary_map = np.zeros((grid_y, grid_x))
+                    height_map = np.zeros((grid_y, grid_x))
+                    regression_map = np.zeros((3, grid_y, grid_x))                     
+                    for line in f:
+                        pos = np.array(list(map(float, line.split(" "))))
+                        rescaled_pos = self.depth2bev.backproject_and_rescale(
+                                pos, self.depth2bev.fixed_depth / max_depth)
+                        for r in range(3): rescaled_pos[r] += self.last_offsets[r]
+                        # pixel location of the object
+                        i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=pixor_downsample)
+                        k = self.depth2bev.z_2_grid(rescaled_pos[2], scale=pixor_downsample)
+                        # set pixels in ~50 pixel radius to 1 (50 / 10 / 4 ~ 2)
+                        if 0 <= i < grid_x and 0 <= j < grid_y and 0 <= k < grid_z:
+                            if k < 0:
+                                print('%s/annotations/%03d.txt' %(video_path, idx), pos[2], rescaled_pos[2], k)
+                            c = (i, j) 
+                            # TODO: tune this parameter (2-3)
+                            px = utils.get_nearby_pixels(c, 2, (grid_y, grid_x))
+                            for p in px: # positives
+                                binary_map[p[1], p[0]] = 1
+                                height_map[p[1], p[0]] = k
+                                # compute dx, dy, and dz for each grid cell in the set of positives 
+                                x, y, z = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, k=k)
+                                dx = rescaled_pos[0] - x; dy = rescaled_pos[1] - y; dz = rescaled_pos[2] - z
+                                regression_map[0, p[1], p[0]] = dx
+                                regression_map[1, p[1], p[0]] = dy
+                                regression_map[2, p[1], p[0]] = dz
+                    return {'binary_target': binary_map, 'z_target': height_map, 'regression_target': regression_map}
+
         def load(x, nc, start, seq, interp, c):
             out = []
             for j,f in enumerate(seq):
@@ -70,6 +129,10 @@ class IntPhys(torch.utils.data.Dataset):
                 raise NotImplementedError
             elif x == 'depth':
                 return loadDiff('depth', 1, start, seq, 'bilinear', c)
+            elif x == 'bev-depth':
+                return loadBEV(start, label=False)
+            elif x == 'bev-label':
+                return loadBEV(start, label=True)
             elif x == 'mask':
                 mask_value = utils.get_mask_index(
                     os.path.join(video_path, str(c), 'status.json'),

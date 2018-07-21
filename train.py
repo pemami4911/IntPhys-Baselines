@@ -13,21 +13,21 @@ import utils
 from tqdm import tqdm
 
 opt = option.make(argparse.ArgumentParser())
-opt.nbatch_train = opt.bsz
-opt.nbatch_val = opt.bsz
 
 trainLoader = torch.utils.data.DataLoader(
     datasets.IntPhys(opt, 'paths_train'),
-    opt.nbatch_train,
+    opt.bsz,
     num_workers=opt.nThreads,
     shuffle=True
 )
 valLoader = torch.utils.data.DataLoader(
     datasets.IntPhys(opt, 'paths_val'),
-    opt.nbatch_val,
+    opt.bsz,
     num_workers=opt.nThreads,
     shuffle=True
 )
+opt.nbatch_train = len(trainLoader) 
+opt.nbatch_val = len(valLoader)
 print(opt)
 random.seed(opt.manualSeed)
 torch.manual_seed(opt.manualSeed)
@@ -91,12 +91,14 @@ try:
         val_slices = utils.slice_epoch(opt.nbatch_val, opt.n_slices)
         for ts, vs, j in zip(train_slices, val_slices, range(opt.n_slices)):
             log[i].append({})
-            for k, batch in zip(ts, trainLoader):
+            model.train()
+            for k, batch in tqdm(zip(ts, trainLoader)):
                 t = time.time()
                 loss_train = process_batch(batch, loss_train, i, k, 'train', t0)
                 t_optim += time.time() - t
             for key, value in loss_train.items():
                 log[i][j]['train_' + key] = float(np.mean(value[-opt.nbatch_train:]))
+            model.eval()
             for k, batch in zip(vs, valLoader):
                 loss_val = process_batch(batch, loss_val, i, k, 'val', t0)
                 t_optim += time.time() - t

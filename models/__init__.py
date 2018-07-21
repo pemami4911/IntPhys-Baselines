@@ -3,5 +3,6 @@ from .gan import Gan
 from .identity import Identity
 from .linear_rnn import Linear_rnn
 from .analysis import Analysis
+from .pixor import PIXOR
 
-__all__ = ['Resnet_ae', 'Gan', 'Identity', 'Linear_rnn', 'Analysis']
+__all__ = ['Resnet_ae', 'Gan', 'Identity', 'Linear_rnn', 'Analysis', 'PIXOR']

@@ -8,6 +8,7 @@ import sys
 import numpy as np
 import scipy.misc
 import math
+import queue
 
 def get_mask_index(filename, mask_object):
     """Get the index of an object from a metadata file
@@ -153,3 +154,58 @@ def enableBNRunningMeanStd(m):
     if classname.find('BatchNorm') != -1:
         setattr(m, 'momentum', m._saved_momentum)
         delattr(m, '_saved_momentum')
+
+def get_nearby_pixels(c, radius, image_dims):
+    """
+    Get coordinates of all pixels within a manhattan distance
+    of radius from c=(i,j).
+
+    i -> width
+    j -> height
+    """
+    def get_cardinal_neighbors(c):
+        i = c[0]; j = c[1]
+        return [(i, j-1), (i, j+1), (i+1,j), (i-1,j)]
+    visited = [c]
+    if radius < 1:
+        return visited
+    i = c[0]; j = c[1]
+    height = image_dims[0]; width = image_dims[1]
+    visited = [c]
+    need_to_explore = queue.Queue()
+    # start by enqueue'ing all pixels within rad 1
+    nhbrs = get_cardinal_neighbors(c)
+    for n in nhbrs: 
+        # only enqueue pixels within image and that
+        # haven't been visited yet
+        if 0 <= n[0] < width and 0 <= n[1] < height \
+                and n not in visited:
+            need_to_explore.put(n)
+    radius_explored = 1
+    # temporary 
+    explore_next_tmp = []
+    # explore up to (inclusive)  manhattan distance of radius
+    while radius_explored < radius:
+        # visit all enqueued pixels
+        while not need_to_explore.empty():
+            next_pixel = need_to_explore.get()
+            visited += [next_pixel]
+            explore_next_tmp += get_cardinal_neighbors(next_pixel)
+        explore_next_tmp = list(set(explore_next_tmp))  # handle duplicates
+        for n in explore_next_tmp:
+            if 0 <= n[0] < width and 0 <= n[1] < height \
+                    and n not in visited:
+                need_to_explore.put(n)
+        explore_next_temp = []
+        radius_explored += 1
+    return visited
+
+if __name__ == '__main__':
+    # H = 7, W = 6
+    radius = 3
+    c = (5,5)
+    result = get_nearby_pixels(c, radius, (7,6))
+    for idx,r in enumerate(result):
+        print("{}, {}".format(idx, r))
+
+    print(slice_epoch(100, 10))

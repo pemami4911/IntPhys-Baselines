@@ -13,7 +13,7 @@ def make(parser):
     parser.add_argument('--pattern', default='/mnt/20170407/train/%05d_block_O1_train',)
     parser.add_argument('--checkpoint', default='./checkpoints', help='path to checkpoint folder')
     parser.add_argument('--n_frames', type=int, default=100, help='numbers of frames in videos')
-    parser.add_argument('--bsz', type=int, default=100, help='batch size')
+    parser.add_argument('--bsz', type=int, default=2, help='batch size')
 
     parser.add_argument('--input_seq', nargs='+', type=int, default=[1], help='pattern of input sequences')
     parser.add_argument('--target_seq', nargs='+', type=int, default=[1], help='pattern of input sequences')
@@ -80,6 +80,10 @@ def make(parser):
     parser.add_argument('--lambda', type=float, default=0)
     parser.add_argument('--target_real', type=float, default=0.9)
     parser.add_argument('--target_fake', type=float, default=0)
+    parser.add_argument('--bev_dims', nargs='+', type=int, default=[348, 250, 35])
+    parser.add_argument('--conf_thresh', type=float, default=0.6)
+    parser.add_argument('--IOU_thresh', type=float, default=0.7)
+    parser.add_argument('--ball_radius', type=float, default=50)
 
     opt = parser.parse_args()
 
