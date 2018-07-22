@@ -252,6 +252,8 @@ class Gan(Model):
             lr=opt.lrG,
             betas=(opt.beta1G, 0.999)
         )
+        # TODO:
+        self.optim_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizerD, milestones=[20,30], gamma=0.1)
 
     def gpu(self):
         self.input = self.input.cuda()

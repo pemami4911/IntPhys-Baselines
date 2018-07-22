@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,6 +22,7 @@ class PIXOR(nn.Module, Model):
         self.target_y_dim = 87
         self.conf_thresh = opt.conf_thresh
         self.ball_radius = opt.ball_radius
+        self.IOU_thresh = opt.IOU_thresh
         # Initial processing by 2 Conv2d layers with
         # 3x3 kernel, stride 1, padding 1
         self.block1 = nn.Sequential(
@@ -72,6 +74,8 @@ class PIXOR(nn.Module, Model):
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+        # use class imbalance prior from RetinaNet
+        nn.init.constant_(self.classification_out.bias, -2.69810055)
         self.bsz = 1 if test else opt.bsz
         # stuff for forward pass
         # N C H W format for Pytorch
@@ -103,37 +107,55 @@ class PIXOR(nn.Module, Model):
         """
         self.input.data.copy_(batch[0].squeeze())
         # flatten last two dimensions
-        self.regression_target.data.copy_(batch[1]['regression_target'].view(self.bsz, 3, -1))
-        self.binary_class_target.data.copy_(batch[1]['binary_target'].view(self.bsz, 1, -1))
-        self.categorical_target.data.copy_(batch[1]['z_target'].view(-1, 1))
-        reg_out, binary_out, cat_out = self.forward(self.input)
+        self.regression_target.data.copy_(batch[1]['regression_target'].view(self.bsz, 3, self.target_x_dim * self.target_y_dim))
+        self.binary_class_target.data.copy_(batch[1]['binary_target'].view(self.bsz, 1, self.target_x_dim * self.target_y_dim))
+        self.categorical_target.data.copy_(batch[1]['z_target'].view(self.bsz * self.target_x_dim * self.target_y_dim, 1))
+        self.reg_out, self.binary_out, self.cat_out = self.forward(self.input)
         # Compute losses
         # Binary classification loss
-        binary_classification_loss = self.focal_loss(binary_out, self.binary_class_target)
-        # split into dxreg_out = reg_out.view(reg_out.shape[0], -1)
-        # regression loss only computed over positive samples
-        reg_out = reg_out.view(self.bsz, 3, -1)
-        # zero out predictions not at positive samples
-        reg_out = reg_out * self.binary_class_target
-        regression_loss = self.smoothL1(reg_out, self.regression_target)
-        # compute categorical loss
-        # zero out predictions not a positive samples
-        # channel-wise softmax, in shape [N,C] (9 classes)
-        cat_out = cat_out.view(-1, 9)
-        binary_target_flat = self.binary_class_target.view(-1)
-        # select only positive samples
-        cat_out = cat_out[binary_target_flat.byte()]
-        cat_target_out = self.categorical_target[binary_target_flat.byte()]
-        height_logits = F.log_softmax(cat_out, dim=1)
-        categorical_loss = self.nll(height_logits, cat_target_out.long().squeeze())
-        total_loss = binary_classification_loss + regression_loss + categorical_loss
+        binary_classification_loss = self.focal_loss(self.binary_out, self.binary_class_target)
+        # If there are no objects in the scene, no regression or cat loss
+        if not self.binary_class_target.byte().any():
+            total_loss = binary_classification_loss
+            result = {'{}_total_loss'.format(set_): total_loss.item(),
+                    '{}_binary_classification_loss'.format(set_): binary_classification_loss.item()}
+        else:
+            # regression loss only computed over positive samples
+            reg_out = self.reg_out.view(self.bsz, 3, self.target_x_dim * self.target_y_dim)
+            # zero out predictions not at positive samples
+            reg_out = reg_out * self.binary_class_target
+            regression_loss = self.smoothL1(reg_out, self.regression_target)
+            # compute categorical loss
+            # zero out predictions not a positive samples
+            # channel-wise softmax, in shape [N,C] (9 classes)
+            # TODO: don't hardcode 9
+            cat_out = self.cat_out.view(-1, 9)
+            binary_target_flat = self.binary_class_target.flatten()
+            # select only positive samples
+            cat_out = cat_out[binary_target_flat.byte()]
+            cat_target_out = self.categorical_target[binary_target_flat.byte()]
+            height_logits = F.log_softmax(cat_out, dim=1)
+            categorical_loss = self.nll(height_logits, cat_target_out.long().squeeze())
+            total_loss = binary_classification_loss + regression_loss + categorical_loss
+            result = {'{}_regression_loss'.format(set_): regression_loss.item(),
+                    '{}_binary_classification_loss'.format(set_): binary_classification_loss.item(),
+                    '{}_categorical_loss'.format(set_): categorical_loss.item(),
+                    '{}_total_loss'.format(set_): total_loss.item()}
         if set_ == 'train':
             self.zero_grad()
             total_loss.backward()
             self.optimizer.step()
-        return {'regression_loss': regression_loss.item(), 'binary_clasification_loss': binary_classification_loss.item(),
-                'categorical_loss': categorical_loss.item()}
+        return result 
     
+    def output(self):
+        with torch.no_grad():
+            bo = self.binary_out[0].sigmoid().round() * 255
+            _, co = torch.max(F.softmax(self.cat_out[0,:]), dim=0) * (255 / 9.)
+            cat1 = torch.cat([bo, self.reg_out[0], co.float().unsqueeze(0)], 0)
+            d1, d2, d3 = cat1.shape
+            cat1 = cat1.view(d1 * d2, d3).cpu().numpy()
+            return cat1
+
     def predict(self, x, depth2bev):
         """
         At test time, input is just the BEV representation of the scene.
@@ -153,18 +175,19 @@ class PIXOR(nn.Module, Model):
             # assume this is [N,2], where N is the # of pixels
             pixels = (conf_scores > self.conf_thresh).nonzero()
             dxs = reg_out[0]; dys = reg_out[1]; dzs = reg_out[2]
-            dets = []
-            for p in pixels:
+            dets = np.zeros((pixels.shape[0], 4))
+            for i, p in enumerate(pixels):
                 # decode pixels
                 _, k = torch.max(F.softmax(cat_out[:,p]), dim=0)
                 # pixels is [height x width], so [j, i]
                 x, y, z = depth2bev.grid_cell_2_point(p[1], p[0], scale=4, k=k)
-                world_x = x + dxs[p]
-                world_y = y + dys[p]
-                world_z = z + dzs[p]
-                dets.append({'x': world_x, 'y': world_y, 'z': world_z, 'p': conf_scores[p]})
+                dets[i,0] = x + dxs[p]
+                dets[i,1] = y + dys[p]
+                dets[i,2] = z + dzs[p]
+                dets[i,3] = conf_scores[p]
             return self.NMS(dets)
-
+    
+    # TODO: test
     def NMS(self, detections):
         """
         Apply NMS to set of detections with corresponding predictions
@@ -173,12 +196,40 @@ class PIXOR(nn.Module, Model):
         # 2. Discard other detections with overlap between circles higher than 
         # self.IOU_thresh (0.5)
         # Repeat 1-2 until all detections have been handled
-        #def IOU(x1, y1, r1, x2, y2, r2):
-        """ IOU between two circles """
-        #intersection = 
-        #union = (np.pi * r1 ** 2) + (np.pi * r2 ** 2) - intersection
-        #return intersection / union
-        pass
+        results = []
+        # TODO: vectorize this
+        def IOU(x1, y1, r1, x2, y2, r2):
+            """ IOU between two circles """
+            # distance between circle centers
+            d = np.linalg.norm(np.array([y2 - y1, x2 - x1]))
+            if d >= r1 + r2: # the circles do not intersect
+                return 0.
+            elif d == 0.:
+                intersection = np.pi * r1 ** 2
+            else:
+                alpha = np.arccos((r1 ** 2 + d ** 2 - r2 ** 2) / (2 * r1 * d))
+                beta = np.arccos((r2 ** 2 + d ** 2 - r1 ** 2) / (2 * r2 * d))
+                intersection = alpha * r1 ** 2 + beta * r2 ** 2 - 0.5 * r1 ** 2 \
+                        * np.sin(2 * alpha) - 0.5 * r2 ** 2 * np.sin(2 * beta)
+            union = (np.pi * r1 ** 2) + (np.pi * r2 ** 2) - intersection
+            return intersection / union
+        # sort in decreasing order of confidence
+        x = detections[:,0]
+        y = detections[:,1]
+        p = detections[:,3]
+        idxs = np.argsort(p)
+        while len(idxs) > 0:
+            last = len(idxs) - 1
+            i = idxs[last]
+            results.append(i)
+            scores = []
+            for l in range(last-1, -1, -1):
+                j = idxs[j]
+                score = IOU(x[i], y[i], self.ball_radius, x[j], y[j], self.ball_radius)
+                scores.append(score)
+            idxs = np.delete(idxs, np.concatenate(([last],
+                np.where(scores > self.IOU_thresh)[0])))
+        return detections[results]
 
     def focal_loss(self, x, y):
         '''Focal loss.
@@ -193,10 +244,11 @@ class PIXOR(nn.Module, Model):
         '''
         alpha = 0.25
         gamma = 2
-
+        dx1, dx2, dx3, dx4 = x.shape
+        dy1, dy2, dy3 = y.shape
         # flatten both x and y int [N,H*W]
-        x_ = x.squeeze().view(x.shape[0], -1)
-        t = y.squeeze()
+        x_ = x.view(dx1, dx3 * dx4)
+        t = y.view(dy1, dy3)
         p = x_.sigmoid()
         pt = p*t + (1-p)*(1-t)         # pt = p if t > 0 else 1-p
         w = alpha*t + (1-alpha)*(1-t)  # w = alpha if t > 0 else 1-alpha
@@ -263,7 +315,7 @@ class PIXOR(nn.Module, Model):
         return r, c, m
 
 if __name__ == '__main__':
-    import numpy as np
+    
     pix = PIXOR([348, 250, 35])
     pix = pix.cuda()
     model_parameters = filter(lambda p: p.requires_grad, pix.parameters())

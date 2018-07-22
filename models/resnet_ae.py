@@ -94,6 +94,7 @@ class Resnet_ae(nn.Module, Model):
             self.maskPredictor = None
             # does this have to be done at the end of __init__ ?
         self.optimizer = optim.Adam(self.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+        self.optim_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer(), milestones=[20,30], gamma=0.1)
 
     def forward(self, x):
         x = self.resnet_features.forward(x)

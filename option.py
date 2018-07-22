@@ -82,7 +82,7 @@ def make(parser):
     parser.add_argument('--target_fake', type=float, default=0)
     parser.add_argument('--bev_dims', nargs='+', type=int, default=[348, 250, 35])
     parser.add_argument('--conf_thresh', type=float, default=0.6)
-    parser.add_argument('--IOU_thresh', type=float, default=0.7)
+    parser.add_argument('--IOU_thresh', type=float, default=0.5)
     parser.add_argument('--ball_radius', type=float, default=50)
 
     opt = parser.parse_args()

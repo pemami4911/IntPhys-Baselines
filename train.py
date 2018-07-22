@@ -71,12 +71,20 @@ def process_batch(batch, loss, i, k, set_, t0):
             %(batch_time, set_, eta / (60 * 60), (eta / 60) % 60, eta % 60)
         print(out, end='\r')
     if opt.image_save or opt.visdom:
-        to_plot = []
-        nviz = min(10, opt.bsz)
-        to_plot.append(utils.stack(batch[0], nviz, opt.input_len))
-        to_plot.append(utils.stack(batch[1], nviz, opt.target_len))
-        to_plot.append(utils.stack(model.output(), nviz, opt.target_len))
-        img = np.concatenate(to_plot, 2)
+        if opt.input != 'bev-depth':
+            to_plot = []
+            nviz = min(10, opt.bsz)
+            to_plot.append(utils.stack(batch[0], nviz, opt.input_len))
+            to_plot.append(utils.stack(batch[1], nviz, opt.target_len))
+            to_plot.append(utils.stack(model.output(), nviz, opt.target_len))
+            img = np.concatenate(to_plot, 2)
+        else:
+            to_plot = []
+            bev, targets = utils.bev_batch_viz(batch)
+            to_plot.append(bev)
+            to_plot.append(targets)
+            to_plot.append(model.output())
+            img = to_plot            
         viz(img, loss, i, k, nbatch, set_)
     return loss
 
@@ -107,6 +115,8 @@ try:
             utils.checkpoint('%d_%d' %(i, j), model, log, opt)
             log[i][j]['time(optim)'] = '%.2f(%.2f)' %(time.time() - t0, t_optim)
             print(log[i][j])
+        # step the learning rate
+        model.optim_scheduler.step()
 
 except KeyboardInterrupt:
     time.sleep(2) # waiting for all threads to stop

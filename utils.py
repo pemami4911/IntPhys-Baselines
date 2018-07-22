@@ -62,6 +62,28 @@ def stack(input_, n, seq):
         cat1.append(torch.cat(cat2, 2))
     return torch.cat(cat1, 1).cpu().numpy()
 
+def bev_batch_viz(batch):
+    """
+    Prepare BEV batch contents for Vizdom
+    """
+    # x is [35, 250, 348]
+    x = batch[0][0]
+    # bt is [1, 63, 87]
+    binary_target = batch[1]['binary_target'][0].unsqueeze(0) * 255
+    # rt is [3, 63, 87]
+    regression_target = batch[1]['regression_target'][0]
+    # ct is [1, 63, 87]
+    categorical_target = batch[1]['z_target'][0].unsqueeze(0) * (255 / 9.)
+        
+    tmp = x[0,:,:] * 255
+    for i in range(1,x.shape[0]):
+        tmp |= (x[i,:,:] * 255)
+    tmp = tmp.cpu().numpy()
+    targets = torch.cat([binary_target, regression_target, categorical_target], 0)
+    d1, d2, d3 = targets.shape
+    targets = targets.view(d1 * d2, d3).cpu().numpy()
+    return tmp, targets
+
 def Viz(opt):
     """Visualization"""
     if opt.visdom:
@@ -79,11 +101,12 @@ def Viz(opt):
             )
         if opt.visdom and batch_idx % opt.visdom_interval == 0:
             options = {'title': 'Epoch %02d - %s - Batch %06d/%06d' %(epoch, set_, batch_idx, nbatch)}
-            vis.image(
-                img = img,
-                win = visdom_id + set_,
-                env = opt.name
-            )
+            for i,im in enumerate(img):
+                vis.image(
+                    img = im,
+                    win = visdom_id + set_ + '-' + str(i),
+                    env = opt.name
+                )
             for i,c in curve.items():
                 if len(c) > 1:
                     vis.line(
