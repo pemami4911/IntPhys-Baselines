@@ -34,6 +34,46 @@ torch.manual_seed(opt.manualSeed)
 if opt.gpu:
     torch.cuda.manual_seed_all(opt.manualSeed)
 
+if opt.normalize_regression:
+    dx = np.array([])
+    dy = np.array([])
+    dz = np.array([])
+    # iterate over training and val sets and compute
+    for b in tqdm(trainLoader):
+        regression = b[1]['regression_target']
+        for t in range(opt.bsz):
+            dxs = regression[t][0]
+            dys = regression[t][1]
+            dzs = regression[t][2]
+            dx = np.concatenate([dx, dxs[dxs != 0.].numpy()])
+            dy = np.concatenate([dy, dys[dys != 0.].numpy()])
+            dz = np.concatenate([dz, dzs[dzs != 0.].numpy()])
+    for b in tqdm(valLoader):
+        regression = b[1]['regression_target']
+        for t in range(opt.bsz):
+            dxs = regression[t][0]
+            dys = regression[t][1]
+            dzs = regression[t][2]
+            dx = np.concatenate([dx, dxs[dxs != 0.].numpy()])
+            dy = np.concatenate([dy, dys[dys != 0.].numpy()])
+            dz = np.concatenate([dz, dzs[dzs != 0.].numpy()])
+    with open(opt.regression_statistics_file, 'w') as rs:
+        for x in [dx, dy, dz]:
+            mean = np.mean(x)
+            var = np.var(x)
+            rs.write("3 {} {}\n".format(mean, var))
+            print(mean, var)
+    exit(0)
+else:
+    regression_stats = []
+    with open(opt.regression_statistics_file, 'r') as rs:
+        for i in range(3):
+            l = rs.readline().split(" ")
+            # TODO: check that binary class grid manhattan distance
+            mean = float(l[1])
+            var = float(l[2])
+            regression_stats.append([mean, var])
+        opt.regression_statistics = regression_stats
 model = locate('models.%s' %opt.model)(opt)
 if opt.load:
     model.load(opt.load)
@@ -115,8 +155,8 @@ try:
             utils.checkpoint('%d_%d' %(i, j), model, log, opt)
             log[i][j]['time(optim)'] = '%.2f(%.2f)' %(time.time() - t0, t_optim)
             print(log[i][j])
-        # step the learning rate
-        model.optim_scheduler.step()
+        # optionally update LR after each epoch has passed
+        model.lr_step()
 
 except KeyboardInterrupt:
     time.sleep(2) # waiting for all threads to stop
@@ -125,3 +165,4 @@ except KeyboardInterrupt:
     if save == 'y':
         print('Saving...')
         utils.checkpoint('final', model, log, opt)
+

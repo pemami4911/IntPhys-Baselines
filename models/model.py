@@ -35,3 +35,6 @@ class Model(object):
 
     def score():
         raise NotImplementedError
+
+    def lr_step():
+        raise NotImplementedError

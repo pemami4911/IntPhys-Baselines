@@ -7,14 +7,12 @@ from torchvision.models.resnet import Bottleneck
 import torch.optim as optim
 from .model import Model
 
-class PIXOR(nn.Module, Model):
+class PIXOR(Model):
     """
-    Some conv arithmetic: when using 3x3 convs with 
-    stride 1 or 2, use padding of 1 to preserve dimensions!
+    Separate model (the IntPhys model API) and PIXORNet to use nn.DataParallel :( 
     """
-
     def __init__(self, opt, test=False):
-        super(PIXOR, self).__init__()
+        super(Model).__init__()
         self.x_dim = opt.bev_dims[0] # width
         self.y_dim = opt.bev_dims[1] # height
         self.z_dim = opt.bev_dims[2] # channels
@@ -23,79 +21,37 @@ class PIXOR(nn.Module, Model):
         self.conf_thresh = opt.conf_thresh
         self.ball_radius = opt.ball_radius
         self.IOU_thresh = opt.IOU_thresh
-        # Initial processing by 2 Conv2d layers with
-        # 3x3 kernel, stride 1, padding 1
-        self.block1 = nn.Sequential(
-            nn.Conv2d(self.z_dim, 32, 3, 1, 1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(32),
-            nn.Conv2d(32, 32, 3, 1, 1),
-            nn.ReLU(inplace=True),
-            nn.BatchNorm2d(32))   
-        self.resnet_inplanes = 32
-        # Blocks 2-5
-        self.block2 = self._make_layer(Bottleneck, 24, 3, stride=2)
-        self.block3 = self._make_layer(Bottleneck, 48, 6, stride=2)
-        self.block4 = self._make_layer(Bottleneck, 64, 6, stride=2)
-        self.block5 = self._make_layer(Bottleneck, 96, 4, stride=2)
-        # Blocks 6-7
-        self.u_bend = nn.Conv2d(384, 196, 1, 1)
-        self.block6 = self._make_deconv_layer(196, 128, output_padding=1)
-        self.block7 = self._make_deconv_layer(128, 96)
-        self.block4_6 = nn.Conv2d(256, 128, 1, 1)
-        self.block3_7 = nn.Conv2d(192, 96, 1, 1)
-
-        # Head network
-        self.header = nn.Sequential(
-                nn.Conv2d(96, 96, 3, 1, 1),
-                nn.ReLU(inplace=True),
-                nn.BatchNorm2d(96),
-                nn.Conv2d(96, 96, 3, 1, 1),
-                nn.ReLU(inplace=True),
-                nn.BatchNorm2d(96),
-                nn.Conv2d(96, 96, 3, 1, 1),
-                nn.ReLU(inplace=True),
-                nn.BatchNorm2d(96),
-                nn.Conv2d(96, 96, 3, 1, 1),
-                nn.ReLU(inplace=True),
-                nn.BatchNorm2d(96))
-        # binary occupation over BEV grid map
-        # this can be directly interpreted as logits for Sigmoid
-        self.classification_out = nn.Conv2d(96, 1, 3, 1, 1)
-        # dx, dy, dz offsets
-        self.regression_out = nn.Conv2d(96, 3, 3, 1, 1)
-        # multi-class classification for z-dimension occupation
-        # this can be directly interpreted as logits for Softmax2d
-        self.categorical_out = nn.Conv2d(96, 9, 3, 1, 1)
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-        # use class imbalance prior from RetinaNet
-        nn.init.constant_(self.classification_out.bias, -2.69810055)
         self.bsz = 1 if test else opt.bsz
+        self.pixor = PIXORNet(opt)
         # stuff for forward pass
         # N C H W format for Pytorch
-        self.input = torch.FloatTensor(self.bsz, self.z_dim, self.y_dim, self.x_dim)
-        self.input = Variable(self.input)
-        self.regression_target = Variable(torch.FloatTensor(self.bsz, 3, self.target_x_dim * self.target_y_dim))
-        self.binary_class_target = Variable(torch.FloatTensor(self.bsz, 1, self.target_x_dim * self.target_y_dim))
-        self.categorical_target = Variable(torch.FloatTensor(self.bsz * self.target_x_dim * self.target_y_dim, 1))
+        self.input = Variable(torch.FloatTensor(self.bsz, self.z_dim, self.y_dim, self.x_dim))
+        self.regression_target = Variable(torch.FloatTensor(self.bsz, 3, 
+            self.target_x_dim * self.target_y_dim))
+        self.binary_class_target = Variable(torch.FloatTensor(self.bsz, 1,
+            self.target_x_dim * self.target_y_dim))
+        self.categorical_target = Variable(torch.FloatTensor(
+            self.bsz * self.target_x_dim * self.target_y_dim, 1))
+        self.input.pin_memory()
+        self.regression_target.pin_memory()
+        self.binary_class_target.pin_memory()
+        self.categorical_target.pin_memory()
         # optimization
         self.smoothL1 = nn.SmoothL1Loss()
         self.nll = nn.NLLLoss()
-        self.optimizer = optim.SGD(self.parameters(), lr=opt.lr, momentum=0.9)
+        self.optimizer = optim.SGD(self.pixor.parameters(), lr=opt.lr, momentum=0.9)
         self.optim_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=[20,30], gamma=0.1)
+        if opt.n_gpus > 1:
+            self.pixor = nn.DataParallel(self.pixor, device_ids=list(range(opt.n_gpus)))
+
+    def parameters(self):
+        return self.pixor.parameters()
     
-    def gpu(self):
-        self.cuda()
-        self.input = self.input.cuda()
-        self.regression_target = self.regression_target.cuda()
-        self.binary_class_target = self.binary_class_target.cuda()
-        self.categorical_target = self.categorical_target.cuda()
+    def train(self):
+        self.pixor.train()
+
+    def eval(self):
+        self.pixor.eval()
 
     def step(self, batch, set_):
         """
@@ -110,9 +66,7 @@ class PIXOR(nn.Module, Model):
         self.regression_target.data.copy_(batch[1]['regression_target'].view(self.bsz, 3, self.target_x_dim * self.target_y_dim))
         self.binary_class_target.data.copy_(batch[1]['binary_target'].view(self.bsz, 1, self.target_x_dim * self.target_y_dim))
         self.categorical_target.data.copy_(batch[1]['z_target'].view(self.bsz * self.target_x_dim * self.target_y_dim, 1))
-        self.reg_out, self.binary_out, self.cat_out = self.forward(self.input)
-        # Compute losses
-        # Binary classification loss
+        self.reg_out, self.binary_out, self.cat_out = self.pixor(self.input)
         binary_classification_loss = self.focal_loss(self.binary_out, self.binary_class_target)
         # If there are no objects in the scene, no regression or cat loss
         if not self.binary_class_target.byte().any():
@@ -130,7 +84,7 @@ class PIXOR(nn.Module, Model):
             # channel-wise softmax, in shape [N,C] (9 classes)
             # TODO: don't hardcode 9
             cat_out = self.cat_out.view(-1, 9)
-            binary_target_flat = self.binary_class_target.flatten()
+            binary_target_flat = self.binary_class_target.view(-1)
             # select only positive samples
             cat_out = cat_out[binary_target_flat.byte()]
             cat_target_out = self.categorical_target[binary_target_flat.byte()]
@@ -142,22 +96,35 @@ class PIXOR(nn.Module, Model):
                     '{}_categorical_loss'.format(set_): categorical_loss.item(),
                     '{}_total_loss'.format(set_): total_loss.item()}
         if set_ == 'train':
-            self.zero_grad()
+            self.pixor.zero_grad()
             total_loss.backward()
             self.optimizer.step()
         return result 
     
+    def gpu(self):
+        self.pixor.cuda()
+        self.input = self.input.cuda(async=True)
+        self.regression_target = self.regression_target.cuda(async=True)
+        self.binary_class_target = self.binary_class_target.cuda(async=True)
+        self.categorical_target = self.categorical_target.cuda(async=True)
+
     def output(self):
         with torch.no_grad():
             bo = self.binary_out[0].sigmoid().round() * 255
-            _, co = torch.max(F.softmax(self.cat_out[0,:]), dim=0) * (255 / 9.)
-            cat1 = torch.cat([bo, self.reg_out[0], co.float().unsqueeze(0)], 0)
+            _, co = torch.max(F.softmax(self.cat_out[0,:]), dim=0)
+            co = co.float() * (255 / 9.)
+            cat1 = torch.cat([bo, self.reg_out[0], co.unsqueeze(0)], 0)
             d1, d2, d3 = cat1.shape
             cat1 = cat1.view(d1 * d2, d3).cpu().numpy()
             return cat1
 
+    def lr_step(self):
+        self.optim_scheduler.step()
+    
     def predict(self, x, depth2bev):
         """
+        TODO: Get rid of depth2bev arg
+
         At test time, input is just the BEV representation of the scene.
         Outputs object detection predictions
 
@@ -166,7 +133,7 @@ class PIXOR(nn.Module, Model):
         """
         with torch.no_grad():
             self.input.data.copy_(x)
-            reg_out, binary_out, cat_out = self.forward(self.input)
+            reg_out, binary_out, cat_out = self.pixor.forward(self.input)
             reg_out = reg_out.squeeze()
             binary_out = binary_out.squeeze()
             cat_out = cat_out.squeeze()
@@ -231,6 +198,7 @@ class PIXOR(nn.Module, Model):
                 np.where(scores > self.IOU_thresh)[0])))
         return detections[results]
 
+
     def focal_loss(self, x, y):
         '''Focal loss.
 	Based on https://github.com/kuangliu/pytorch-retinanet/blob/master/loss.py
@@ -254,7 +222,69 @@ class PIXOR(nn.Module, Model):
         w = alpha*t + (1-alpha)*(1-t)  # w = alpha if t > 0 else 1-alpha
         w = w * (1-pt).pow(gamma)
         return F.binary_cross_entropy_with_logits(x_, t, w)
- 
+
+class PIXORNet(nn.Module):
+    """
+    Some conv arithmetic: when using 3x3 convs with 
+    stride 1 or 2, use padding of 1 to preserve dimensions!
+    """
+
+    def __init__(self, opt):
+        super(PIXORNet, self).__init__()
+        # Initial processing by 2 Conv2d layers with
+        # 3x3 kernel, stride 1, padding 1
+        self.block1 = nn.Sequential(
+            nn.Conv2d(opt.bev_dims[2], 32, 3, 1, 1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32, 32, 3, 1, 1),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm2d(32))   
+        self.resnet_inplanes = 32
+        # Blocks 2-5
+        self.block2 = self._make_layer(Bottleneck, 24, 3, stride=2)
+        self.block3 = self._make_layer(Bottleneck, 48, 6, stride=2)
+        self.block4 = self._make_layer(Bottleneck, 64, 6, stride=2)
+        self.block5 = self._make_layer(Bottleneck, 96, 4, stride=2)
+        # Blocks 6-7
+        self.u_bend = nn.Conv2d(384, 196, 1, 1)
+        self.block6 = self._make_deconv_layer(196, 128, output_padding=1)
+        self.block7 = self._make_deconv_layer(128, 96)
+        self.block4_6 = nn.Conv2d(256, 128, 1, 1)
+        self.block3_7 = nn.Conv2d(192, 96, 1, 1)
+
+        # Head network
+        self.header = nn.Sequential(
+                nn.Conv2d(96, 96, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.BatchNorm2d(96),
+                nn.Conv2d(96, 96, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.BatchNorm2d(96),
+                nn.Conv2d(96, 96, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.BatchNorm2d(96),
+                nn.Conv2d(96, 96, 3, 1, 1),
+                nn.ReLU(inplace=True),
+                nn.BatchNorm2d(96))
+        # binary occupation over BEV grid map
+        # this can be directly interpreted as logits for Sigmoid
+        self.classification_out = nn.Conv2d(96, 1, 3, 1, 1)
+        # dx, dy, dz offsets
+        self.regression_out = nn.Conv2d(96, 3, 3, 1, 1)
+        # multi-class classification for z-dimension occupation
+        # this can be directly interpreted as logits for Softmax2d
+        self.categorical_out = nn.Conv2d(96, 9, 3, 1, 1)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+        # use class imbalance prior from RetinaNet
+        nn.init.constant_(self.classification_out.bias, -2.69810055)
+    
     def _make_deconv_layer(self, in_planes, out_planes, output_padding=0):
         upsample = nn.Sequential(
                 nn.ConvTranspose2d(in_planes, out_planes, 3, 2, 1, 

@@ -8,6 +8,7 @@ import math
 import utils
 from tqdm import tqdm
 from point_cloud import Depth2BEV
+import time
 
 class IntPhys(torch.utils.data.Dataset):
 
@@ -81,7 +82,7 @@ class IntPhys(torch.utils.data.Dataset):
                                 print('%s/annotations/%03d.txt' %(video_path, idx), pos[2], rescaled_pos[2], k)
                             c = (i, j) 
                             # TODO: tune this parameter (2-3)
-                            px = utils.get_nearby_pixels(c, 2, (grid_y, grid_x))
+                            px = utils.get_nearby_pixels(c, 3, (grid_y, grid_x))
                             for p in px: # positives
                                 binary_map[p[1], p[0]] = 1
                                 height_map[p[1], p[0]] = k
@@ -173,6 +174,7 @@ class IntPhys(torch.utils.data.Dataset):
             target = make_output(
                 self.opt.target, frame_idx, self.opt.target_seq
             )
+
         #out.video_path = video_path
         return input_, target
 

@@ -52,15 +52,15 @@ class Depth2BEV:
     if not max_depth:
       max_depth = self.fixed_depth
     depth_data = (depth_data * max_depth) / np.max(np.abs(depth_data))
-    point_cloud = np.zeros((self.frame_width, self.frame_height, 3), dtype=np.float32)
-    for r in range(self.frame_height):
-      for c in range(self.frame_width):
+    point_cloud = np.zeros((int(self.frame_width/2), int(self.frame_height/2), 3), dtype=np.float32)
+    for r in range(0, self.frame_height, 2):
+      for c in range(0, self.frame_width, 2):
         if depth_data[r][c] > 0.0:
           v = -(r - self.cy)
           u = (c - self.cx)
           Z = depth_data[r][c]
           # Unreal engine uses left-hand XZY coordinates with z-up
-          point_cloud[r, c, :] = [Z, u*Z/self.fx, v*Z/self.fy]
+          point_cloud[int(np.ceil(r/2)), int(np.ceil(c/2)), :] = [Z, u*Z/self.fx, v*Z/self.fy]
     return point_cloud
 
   def display_point_cloud(self, point_cloud, view='3d', objects=None):
@@ -225,10 +225,12 @@ class Depth2BEV:
       else:
         offsets.append(0.)
     z_start = 0
+    # TODO: Parallelize this for loop
     for h in range(self.bev_z_channels):
       z_end = z_start + bev_z_res
       pts = point_cloud[(point_cloud[:,:,2] >= z_start) & (point_cloud[:,:,2] < z_end)]
       # compute grid cell for each point
+      # TODO: Parallelize or vectorize?
       for p in pts:
         # throw out points at the camera
         if p[0] == 0.0:

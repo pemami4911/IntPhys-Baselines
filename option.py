@@ -45,6 +45,7 @@ def make(parser):
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
     parser.add_argument('--beta1', type=float, default=0.5)
     parser.add_argument('--momentum', type=float, default=0.9)
+    parser.add_argument('--n_gpus', type=int, default=1)
 
     parser.add_argument('--load', action='append', type=lambda kv: kv.split("="), dest='load', help='Paths to trained models: for simple models use \"--load path/to/model.pth\", for GANs use \"--load netG=path/to/Generator.pth --load netD=path/to/Discriminator.pth')
     parser.add_argument('--maskPredictor', action='append', type=lambda kv: kv.split("="), dest='maskPredictor', help='Path to a mask predictor')
@@ -80,10 +81,13 @@ def make(parser):
     parser.add_argument('--lambda', type=float, default=0)
     parser.add_argument('--target_real', type=float, default=0.9)
     parser.add_argument('--target_fake', type=float, default=0)
+    
     parser.add_argument('--bev_dims', nargs='+', type=int, default=[348, 250, 35])
     parser.add_argument('--conf_thresh', type=float, default=0.6)
     parser.add_argument('--IOU_thresh', type=float, default=0.5)
-    parser.add_argument('--ball_radius', type=float, default=50)
+    parser.add_argument('--ball_radius', type=float, default=60)
+    parser.add_argument('--normalize_regression', action='store_true', help='compute mean and variance of regression data')
+    parser.add_argument('--regression_statistics_file', type=str, default="regression.txt")
 
     opt = parser.parse_args()
 
