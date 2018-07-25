@@ -8,7 +8,7 @@ def make(parser):
     parser: parser object used to build opt
     """
     parser.add_argument('--model', default='Resnet_ae', help='model to train')
-    parser.add_argument('--list', type=str, default='lists')
+    parser.add_argument('--list', type=str, default='lists/0.7_train')
     parser.add_argument('--count', type=int, default=15000)
     parser.add_argument('--pattern', default='/mnt/20170407/train/%05d_block_O1_train',)
     parser.add_argument('--checkpoint', default='./checkpoints', help='path to checkpoint folder')
@@ -86,8 +86,9 @@ def make(parser):
     parser.add_argument('--conf_thresh', type=float, default=0.6)
     parser.add_argument('--IOU_thresh', type=float, default=0.5)
     parser.add_argument('--ball_radius', type=float, default=60)
-    parser.add_argument('--normalize_regression', action='store_true', help='compute mean and variance of regression data')
-    parser.add_argument('--regression_statistics_file', type=str, default="regression.txt")
+    parser.add_argument('--normalize_regression', action='store_true', help='use mean and variance of regression data')
+    parser.add_argument('--regression_statistics_file', type=str, default="regression_stats.txt")
+    parser.add_argument('--remove_no_objects', action='store_true', help='remove images without GT objects')
 
     opt = parser.parse_args()
 

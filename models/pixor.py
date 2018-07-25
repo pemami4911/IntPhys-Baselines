@@ -13,6 +13,7 @@ class PIXOR(Model):
     """
     def __init__(self, opt, test=False):
         super(Model).__init__()
+        self.__name__ = 'pixor'
         self.x_dim = opt.bev_dims[0] # width
         self.y_dim = opt.bev_dims[1] # height
         self.z_dim = opt.bev_dims[2] # channels
@@ -40,9 +41,15 @@ class PIXOR(Model):
         self.smoothL1 = nn.SmoothL1Loss()
         self.nll = nn.NLLLoss()
         self.optimizer = optim.SGD(self.pixor.parameters(), lr=opt.lr, momentum=0.9)
-        self.optim_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=[20,30], gamma=0.1)
+        self.optim_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=[5,10], gamma=0.1)
         if opt.n_gpus > 1:
             self.pixor = nn.DataParallel(self.pixor, device_ids=list(range(opt.n_gpus)))
+    
+    def load_state_dict(self, x):
+        self.pixor.load_state_dict(x)
+
+    def state_dict(self):
+        return self.pixor.state_dict()
 
     def parameters(self):
         return self.pixor.parameters()
@@ -110,10 +117,12 @@ class PIXOR(Model):
 
     def output(self):
         with torch.no_grad():
-            bo = self.binary_out[0].sigmoid().round() * 255
+            po = self.binary_out[0].sigmoid()
+            bo = po.round() * 255
+            po *= 255
             _, co = torch.max(F.softmax(self.cat_out[0,:]), dim=0)
             co = co.float() * (255 / 9.)
-            cat1 = torch.cat([bo, self.reg_out[0], co.unsqueeze(0)], 0)
+            cat1 = torch.cat([po, bo, self.reg_out[0], co.unsqueeze(0)], 0)
             d1, d2, d3 = cat1.shape
             cat1 = cat1.view(d1 * d2, d3).cpu().numpy()
             return cat1

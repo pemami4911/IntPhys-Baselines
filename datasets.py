@@ -20,6 +20,12 @@ class IntPhys(torch.utils.data.Dataset):
         if opt.list:
             self.file = os.path.join(opt.list, split + '.npy')
             self.paths = np.load(self.file).tolist()
+            if opt.remove_no_objects:
+                self.no_object_indices = \
+                        np.load(os.path.join(opt.list,
+                        split + '_no_object_indices.npy')).tolist()
+            else:
+                self.no_object_indices = []
             count = min(opt.count, len(self.paths)) * self.opt.m
             #count = min(opt.count, len(self.paths))
         else:
@@ -28,11 +34,27 @@ class IntPhys(torch.utils.data.Dataset):
             count = count * 0.9 if split == 'train' else count * 0.1
             count  = int(count)
             self.i0 = 1 if split == 'train'  else int(0.9 * opt.count + 1)
-        vars(opt)['n_sample_%s' %split] = count
-        self.count = count - (count % opt.bsz)
-        vars(opt)['nbatch_%s' %split] = int(count / opt.bsz)
+        # Create list of valid indices for subset sampler
+        self.indices = list(range(count))
+        if len(self.no_object_indices) > 1:
+            self.indices = list(set(self.indices) - set(self.no_object_indices))
+        self.count = len(self.indices)
+        self.count = self.count - (self.count % opt.bsz)
+        vars(opt)['n_sample_%s' %split] = self.count
+        vars(opt)['nbatch_%s' %split] = int(self.count / opt.bsz)
         print('n_sample_%s: %s' %(split, self.count))
         self.last_offsets = None
+        self.manhattan_dist = 3
+        self.regression_stats = []
+        if opt.normalize_regression:
+            with open(opt.regression_statistics_file, 'r') as rs:
+                for i in range(3):
+                    l = rs.readline().split(" ")
+                    md = int(l[0])
+                    assert md == self.manhattan_dist
+                    mean = float(l[1])
+                    var = float(l[2])
+                    self.regression_stats.append([mean, var])
 
     def __getitem__(self, index):
         video_idx = math.floor(index / self.opt.m)
@@ -81,17 +103,17 @@ class IntPhys(torch.utils.data.Dataset):
                             if k < 0:
                                 print('%s/annotations/%03d.txt' %(video_path, idx), pos[2], rescaled_pos[2], k)
                             c = (i, j) 
-                            # TODO: tune this parameter (2-3)
-                            px = utils.get_nearby_pixels(c, 3, (grid_y, grid_x))
+                            px = utils.get_nearby_pixels(c, self.manhattan_dist, (grid_y, grid_x))
                             for p in px: # positives
                                 binary_map[p[1], p[0]] = 1
                                 height_map[p[1], p[0]] = k
                                 # compute dx, dy, and dz for each grid cell in the set of positives 
                                 x, y, z = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, k=k)
                                 dx = rescaled_pos[0] - x; dy = rescaled_pos[1] - y; dz = rescaled_pos[2] - z
-                                regression_map[0, p[1], p[0]] = dx
-                                regression_map[1, p[1], p[0]] = dy
-                                regression_map[2, p[1], p[0]] = dz
+                                for r,d in enumerate([dx, dy, dz]):
+                                    # normalize to N(0,1)
+                                    d = (d - self.regression_stats[r][0]) / self.regression_stats[r][1]
+                                    regression_map[r, p[1], p[0]] = d
                     return {'binary_target': binary_map, 'z_target': height_map, 'regression_target': regression_map}
 
         def load(x, nc, start, seq, interp, c):

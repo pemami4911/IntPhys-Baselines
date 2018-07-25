@@ -71,7 +71,7 @@ def bev_batch_viz(batch):
     # bt is [1, 63, 87]
     binary_target = batch[1]['binary_target'][0].unsqueeze(0) * 255
     # rt is [3, 63, 87]
-    regression_target = batch[1]['regression_target'][0]
+    regression_target = batch[1]['regression_target'][0] * 255
     # ct is [1, 63, 87]
     categorical_target = batch[1]['z_target'][0].unsqueeze(0) * (255 / 9.)
         
