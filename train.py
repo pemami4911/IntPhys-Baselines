@@ -15,6 +15,7 @@ from tqdm import tqdm
 opt = option.make(argparse.ArgumentParser())
 
 d1 = datasets.IntPhys(opt, 'paths_train')
+#d1.indices = np.random.randint(0, opt.bsz)
 trainLoader = torch.utils.data.DataLoader(
     d1,
     opt.bsz,
@@ -22,6 +23,7 @@ trainLoader = torch.utils.data.DataLoader(
     sampler=torch.utils.data.sampler.SubsetRandomSampler(d1.indices)    
 )
 d2 = datasets.IntPhys(opt, 'paths_val')
+#d2.indices = np.random.randint(0, opt.bsz)
 valLoader = torch.utils.data.DataLoader(
     d2,
     opt.bsz,
@@ -31,6 +33,7 @@ valLoader = torch.utils.data.DataLoader(
 opt.nbatch_train = len(trainLoader) 
 opt.nbatch_val = len(valLoader)
 print(opt)
+np.random.seed(opt.manualSeed)
 random.seed(opt.manualSeed)
 torch.manual_seed(opt.manualSeed)
 if opt.gpu:
@@ -105,6 +108,8 @@ try:
             for k, batch in tqdm(zip(ts, trainLoader)):
                 t = time.time()
                 loss_train = process_batch(batch, loss_train, i, k, 'train', t0)
+                # optionally update LR after each epoch/minibatch
+                model.lr_step()
                 t_optim += time.time() - t
             for key, value in loss_train.items():
                 log[i][j]['train_' + key] = float(np.mean(value[-opt.nbatch_train:]))
@@ -118,8 +123,6 @@ try:
             utils.checkpoint('%d_%d' %(i, j), model, log, opt)
             log[i][j]['time(optim)'] = '%.2f(%.2f)' %(time.time() - t0, t_optim)
             print(log[i][j])
-        # optionally update LR after each epoch has passed
-        model.lr_step()
 
 except KeyboardInterrupt:
     time.sleep(2) # waiting for all threads to stop

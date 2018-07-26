@@ -41,7 +41,7 @@ class PIXOR(Model):
         self.smoothL1 = nn.SmoothL1Loss()
         self.nll = nn.NLLLoss()
         self.optimizer = optim.SGD(self.pixor.parameters(), lr=opt.lr, momentum=0.9)
-        self.optim_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=[5,10], gamma=0.1)
+        self.optim_scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=1, gamma=0.1)
         if opt.n_gpus > 1:
             self.pixor = nn.DataParallel(self.pixor, device_ids=list(range(opt.n_gpus)))
     
@@ -253,18 +253,19 @@ class PIXORNet(nn.Module):
         # Blocks 2-5
         self.block2 = self._make_layer(Bottleneck, 24, 3, stride=2)
         self.block3 = self._make_layer(Bottleneck, 48, 6, stride=2)
-        self.block4 = self._make_layer(Bottleneck, 64, 6, stride=2)
-        self.block5 = self._make_layer(Bottleneck, 96, 4, stride=2)
+        #self.block4 = self._make_layer(Bottleneck, 64, 6, stride=2)
+        #self.block5 = self._make_layer(Bottleneck, 96, 4, stride=2)
         # Blocks 6-7
-        self.u_bend = nn.Conv2d(384, 196, 1, 1)
-        self.block6 = self._make_deconv_layer(196, 128, output_padding=1)
-        self.block7 = self._make_deconv_layer(128, 96)
-        self.block4_6 = nn.Conv2d(256, 128, 1, 1)
-        self.block3_7 = nn.Conv2d(192, 96, 1, 1)
+        #self.u_bend = nn.Conv2d(384, 196, 1, 1)
+        #self.block6 = self._make_deconv_layer(196, 128, output_padding=1)
+        #self.block7 = self._make_deconv_layer(128, 96)
+        #self.block4_6 = nn.Conv2d(256, 128, 1, 1)
+        #self.block3_7 = nn.Conv2d(192, 96, 1, 1)
 
         # Head network
         self.header = nn.Sequential(
-                nn.Conv2d(96, 96, 3, 1, 1),
+                #nn.Conv2d(96, 96, 3, 1, 1),
+                nn.Conv2d(192, 96, 3, 1, 1),
                 nn.ReLU(inplace=True),
                 nn.BatchNorm2d(96),
                 nn.Conv2d(96, 96, 3, 1, 1),
@@ -292,7 +293,7 @@ class PIXORNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
         # use class imbalance prior from RetinaNet
-        nn.init.constant_(self.classification_out.bias, -2.69810055)
+        nn.init.constant_(self.classification_out.bias, -2.1518512)
     
     def _make_deconv_layer(self, in_planes, out_planes, output_padding=0):
         upsample = nn.Sequential(
@@ -329,18 +330,18 @@ class PIXORNet(nn.Module):
         # output [96,125,174]
         x = self.block2(x)
         # output [192,63,87]
-        x3 = self.block3(x)
+        x = self.block3(x)
         # output [256,32,44]
-        x4 = self.block4(x3)
+        #x4 = self.block4(x3)
         # output [384,16,22]
-        x = self.block5(x4)
+        #x = self.block5(x4)
         # Upsampling fusion
         # output [196, 16,22]
-        x = self.u_bend(x)
+        #x = self.u_bend(x)
         # output is [128,32,44]
-        x = self.block4_6(x4) + self.block6(x)
+        #x = self.block4_6(x4) + self.block6(x)
         # output is [96,63,87]
-        x = self.block3_7(x3) + self.block7(x)
+        #x = self.block3_7(x3) + self.block7(x)
 
         # Head network
         x = self.header(x)

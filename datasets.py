@@ -44,6 +44,7 @@ class IntPhys(torch.utils.data.Dataset):
         vars(opt)['nbatch_%s' %split] = int(self.count / opt.bsz)
         print('n_sample_%s: %s' %(split, self.count))
         self.last_offsets = None
+        self.last_flip = False
         self.manhattan_dist = 3
         self.regression_stats = []
         if opt.normalize_regression:
@@ -67,6 +68,10 @@ class IntPhys(torch.utils.data.Dataset):
             pixor_downsample = 4
             idx += 1
             if not label:
+                if np.random.uniform() < 0.5:
+                    self.last_flip = True
+                else:
+                    self.last_flip = False
                 # this cast to np.float32 is very important...
                 depth_img = np.float32(scipy.misc.imread(
                     '%s/depth/depth_%03d.png' %(video_path, idx)))
@@ -76,6 +81,9 @@ class IntPhys(torch.utils.data.Dataset):
                 # Note that this BEV map is already in PyTorch CHW format
                 bev, offsets = self.depth2bev.point_cloud_2_BEV(pc)
                 self.last_offsets = offsets
+                if self.last_flip:
+                    for r in range(bev.shape[0]):
+                        bev[r] = np.flipud(bev[r]).copy()
                 return bev
             else:
                 with open('%s/annotations/%03d.txt' %(video_path, idx), 'r') as f:
@@ -114,6 +122,11 @@ class IntPhys(torch.utils.data.Dataset):
                                     # normalize to N(0,1)
                                     d = (d - self.regression_stats[r][0]) / self.regression_stats[r][1]
                                     regression_map[r, p[1], p[0]] = d
+                    if self.last_flip:
+                        binary_map = np.flipud(binary_map).copy()
+                        height_map = np.flipud(height_map).copy()
+                        for r in range(3):
+                            regression_map[r] = np.flipud(regression_map[r]).copy()
                     return {'binary_target': binary_map, 'z_target': height_map, 'regression_target': regression_map}
 
         def load(x, nc, start, seq, interp, c):
