@@ -81,7 +81,9 @@ def make(parser):
     parser.add_argument('--lambda', type=float, default=0)
     parser.add_argument('--target_real', type=float, default=0.9)
     parser.add_argument('--target_fake', type=float, default=0)
-    
+   
+    parser.add_argument('--pixor_head', type=str, default="full")
+    parser.add_argument('--freeze_lower', action='store_true')
     parser.add_argument('--bev_dims', nargs='+', type=int, default=[348, 250, 35])
     parser.add_argument('--conf_thresh', type=float, default=0.6)
     parser.add_argument('--IOU_thresh', type=float, default=0.5)
@@ -89,6 +91,7 @@ def make(parser):
     parser.add_argument('--normalize_regression', action='store_true', help='use mean and variance of regression data')
     parser.add_argument('--regression_statistics_file', type=str, default="regression_stats.txt")
     parser.add_argument('--remove_no_objects', action='store_true', help='remove images without GT objects')
+    parser.add_argument('--disable_checkpoint', action='store_true')
 
     opt = parser.parse_args()
 
@@ -101,14 +104,15 @@ def make(parser):
     opt.input_len = len(opt.input_seq)
     opt.target_len = len(opt.target_seq)
 
-    if opt.name.find('%d%d%d%d%d%d_%d%d%d%d%d%d') == -1:
-        append =  '_' + time.strftime('%y%m%d_%H%M%S')
-    else:
-        append = ''
-    if not os.path.isdir(opt.checkpoint):
-        print(opt.checkpoint, ' is not a valid directory! creating it!')
-        os.mkdir(opt.checkpoint)
-    opt.checkpoint = os.path.join(opt.checkpoint, opt.name + append)
+    if not opt.disable_checkpoint:
+        if opt.name.find('%d%d%d%d%d%d_%d%d%d%d%d%d') == -1:
+            append =  '_' + time.strftime('%y%m%d_%H%M%S')
+        else:
+            append = ''
+        if not os.path.isdir(opt.checkpoint):
+            print(opt.checkpoint, ' is not a valid directory! creating it!')
+            os.mkdir(opt.checkpoint)
+        opt.checkpoint = os.path.join(opt.checkpoint, opt.name + append)
 
     opt.m = opt.n_frames - max(opt.input_seq[-1], opt.target_seq[-1]) - int(opt.residual) + 1
 

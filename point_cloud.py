@@ -1,5 +1,7 @@
 import numpy as np
 import json
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
@@ -27,7 +29,7 @@ class Depth2BEV:
   In PyTorch, this is 35 x 250 x 348 (NCHW format).
 
   """
-  def __init__(self, image_dims=[288, 288], fovx=90, fovy=90, 
+  def __init__(self, opt, image_dims=[288, 288], fovx=90, fovy=90, 
       bev_x_res=10, bev_y_res=10, z_channels=35,
       bev_dims=[3480, 2500, 800], fixed_depth=2500):
     self.frame_height = image_dims[0]
@@ -47,6 +49,17 @@ class Depth2BEV:
     self.bev_y_dim = bev_dims[1]
     self.bev_z_dim = bev_dims[2]
     self.fixed_depth = fixed_depth
+    self.ball_radius = opt.ball_radius
+    self.regression_stats = []
+    if opt.normalize_regression:
+        with open(opt.regression_statistics_file, 'r') as rs:
+            for i in range(3):
+                l = rs.readline().split(" ")
+                md = int(l[0])
+                mean = float(l[1])
+                std = np.sqrt(float(l[2]))
+                self.regression_stats.append([mean, std])
+
 
   def depth_2_point_cloud(self, depth_data, max_depth=None):
     if not max_depth:
@@ -63,16 +76,24 @@ class Depth2BEV:
           point_cloud[int(np.ceil(r/2)), int(np.ceil(c/2)), :] = [Z, u*Z/self.fx, v*Z/self.fy]
     return point_cloud
 
-  def display_point_cloud(self, point_cloud, view='3d', objects=None):
+  @staticmethod 
+  def display_point_cloud(point_cloud, view='3d', objects=None, radius=200, save=False, name=None):
+    def draw_sphere(cx, cy, cz):
+      u, v = np.mgrid[0:2*np.pi:20j, 0:np.pi:10j]
+      x = (radius*np.cos(u)*np.sin(v)) + cx
+      y = (radius*np.sin(u)*np.sin(v)) + cy
+      z = (radius*np.cos(v)) + cz
+      ax.plot_wireframe(x, y, z, color="r")
+
     if view=='3d':
       # flattened pc for plotting
       point_cloud_flt = np.reshape(point_cloud, (point_cloud.shape[0] * point_cloud.shape[1], 3))
       f = plt.figure(figsize=(8,8))
       ax = f.add_subplot(111, projection='3d')  
       ax.scatter(point_cloud[:, :, 0], point_cloud[:, :, 1], point_cloud[:, :, 2], s=0.75, c=point_cloud_flt[:, 2], cmap='gray')
-      ax.set_xlim(np.min(point_cloud[:,:,0]), np.max(point_cloud[:,:,0]))
-      ax.set_ylim(np.min(point_cloud[:,:,1]), np.max(point_cloud[:,:,1]))
-      ax.set_zlim(np.min(point_cloud[:,:,2]), np.max(point_cloud[:,:,2]))
+      ax.set_xlim(0, 2500)
+      ax.set_ylim(0, 3480)
+      ax.set_zlim(0, 800)
       ax.set_xlabel("x")
       ax.set_ylabel("y")
       ax.set_zlabel("z")
@@ -80,36 +101,37 @@ class Depth2BEV:
       f = plt.figure(figsize=(8,8))
       ax = f.add_subplot(111) 
       plt.scatter(point_cloud[:, :, 1], point_cloud[:, :, 0], s=0.75, cmap='gray')
-      ax.set_xlim(np.min(point_cloud[:,:,1]), np.max(point_cloud[:,:,1]))  # y is <- ->
-      ax.set_ylim(np.min(point_cloud[:,:,0]), np.max(point_cloud[:,:,0]))  # x is depth
+      ax.set_xlim(point_cloud[:,:,1].min(), point_cloud[:,:,1].max())  # y is <- ->
+      ax.set_ylim(point_cloud[:,:,0].min(), point_cloud[:,:,0].max())  # x is depth
     elif view == 'y-z':
       f = plt.figure(figsize=(8,8))
       ax = f.add_subplot(111) 
       plt.scatter(point_cloud[:, :, 1], point_cloud[:, :, 2], s=0.75, cmap='gray')
-      ax.set_xlim(np.min(point_cloud[:,:,1]), np.max(point_cloud[:,:,1]))  # y is <- ->
-      ax.set_ylim(np.min(point_cloud[:,:,2]), np.max(point_cloud[:,:,2]))  # z is up
+      ax.set_xlim(point_cloud[:,:,1].min(), point_cloud[:,:,1].max())  # y is <- ->
+      ax.set_ylim(point_cloud[:,:,2].min(), point_cloud[:,:,2].max())  # z is up
     elif view == 'x-z':
       f = plt.figure(figsize=(8,8))
       ax = f.add_subplot(111) 
       plt.scatter(point_cloud[:, :, 0], point_cloud[:, :, 2], s=0.75, cmap='gray')
-      ax.set_xlim(np.min(point_cloud[:,:,0]), np.max(point_cloud[:,:,0]))  # x is depth
-      ax.set_ylim(np.min(point_cloud[:,:,2]), np.max(point_cloud[:,:,2]))  # z is up
+      ax.set_xlim(point_cloud[:,:,0].min(), point_cloud[:,:,0].max())  # x is depth
+      ax.set_ylim(point_cloud[:,:,2].min(), point_cloud[:,:,2].max())  # z is up
     if objects is not None:
-      x_values = []
-      y_values = []
-      z_values = []
-      for obj in objects:
-        x_values.append(obj[0])
-        y_values.append(obj[1])
-        if view == '3d':
-          z_values.append(obj[2])
-      x_values = np.array(x_values)
-      y_values = np.array(y_values)
-      if view == '3d':
-        z_values = np.array(z_values)
-        ax.scatter(x_values, y_values, z_values, c='r')
+      if view != '3d':
+          x_values = []
+          y_values = []
+          for obj in objects:
+            x_values.append(obj[0])
+            y_values.append(obj[1])
+          x_values = np.array(x_values)
+          y_values = np.array(y_values)
+          ax.scatter(x_values, y_values)
       else:
-        ax.scatter(x_values, y_values)
+        for obj in objects:
+            draw_sphere(obj[0], obj[1], obj[2])
+    ax.view_init(15, 200)
+    if save:
+      plt.savefig(name)
+    plt.close()
 
   @staticmethod
   def parse_status(status_file):
@@ -159,8 +181,10 @@ class Depth2BEV:
     # of lists that contain np.arrays for each ball 
     # (xyz) centroid in camera coordinate frame
     objects = []
+    occluders = []
     for frame in status["frames"]:
       objects.append([])
+      occluders.append([])
       for obj in frame:
         if "object" in obj:
           o = frame[obj]
@@ -168,7 +192,14 @@ class Depth2BEV:
           pos -= camera_offset  # translation
           pos = np.matmul(R, pos.T).T  # rotation
           objects[-1].append(pos[0])
-    return max_depth, objects 
+        if "occluder" in obj:
+          o = frame[obj]
+          pos = np.array(list(map(float, o.split(" ")[:3])), ndmin=2)
+          pos -= camera_offset  # translation
+          pos = np.matmul(R, pos.T).T  # rotation
+          occluders[-1].append(pos[0])
+        
+    return max_depth, objects, occluders 
 
   def backproject_and_rescale(self, obj, depth_ratio):
       """ depth_ratio = new_max_depth / old_max_depth """

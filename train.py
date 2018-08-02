@@ -15,7 +15,6 @@ from tqdm import tqdm
 opt = option.make(argparse.ArgumentParser())
 
 d1 = datasets.IntPhys(opt, 'paths_train')
-#d1.indices = np.random.randint(0, opt.bsz)
 trainLoader = torch.utils.data.DataLoader(
     d1,
     opt.bsz,
@@ -23,7 +22,6 @@ trainLoader = torch.utils.data.DataLoader(
     sampler=torch.utils.data.sampler.SubsetRandomSampler(d1.indices)    
 )
 d2 = datasets.IntPhys(opt, 'paths_val')
-#d2.indices = np.random.randint(0, opt.bsz)
 valLoader = torch.utils.data.DataLoader(
     d2,
     opt.bsz,
@@ -41,7 +39,7 @@ if opt.gpu:
 
 model = locate('models.%s' %opt.model)(opt)
 if opt.load:
-    model.load(opt.load)
+    model.load(opt.load, 'train')
 if opt.gpu:
     model.gpu()
 
@@ -76,20 +74,24 @@ def process_batch(batch, loss, i, k, set_, t0):
             %(batch_time, set_, eta / (60 * 60), (eta / 60) % 60, eta % 60)
         print(out, end='\r')
     if opt.image_save or opt.visdom:
-        if opt.input != 'bev-depth':
+        if 'bev' not in opt.input:
             to_plot = []
             nviz = min(10, opt.bsz)
             to_plot.append(utils.stack(batch[0], nviz, opt.input_len))
             to_plot.append(utils.stack(batch[1], nviz, opt.target_len))
             to_plot.append(utils.stack(model.output(), nviz, opt.target_len))
             img = np.concatenate(to_plot, 2)
-        else:
+        elif opt.input == 'bev-depth':
             to_plot = []
             bev, targets = utils.bev_batch_viz(batch)
             to_plot.append(bev)
             to_plot.append(targets)
             to_plot.append(model.output())
-            img = to_plot            
+            img = to_plot
+        elif opt.input == 'bev-crop':
+            img = []
+            crop = utils.bev_crop_viz(batch)
+            img.append(crop)
         viz(img, loss, i, k, nbatch, set_)
     return loss
 
@@ -108,18 +110,19 @@ try:
             for k, batch in tqdm(zip(ts, trainLoader)):
                 t = time.time()
                 loss_train = process_batch(batch, loss_train, i, k, 'train', t0)
-                # optionally update LR after each epoch/minibatch
-                model.lr_step()
                 t_optim += time.time() - t
             for key, value in loss_train.items():
-                log[i][j]['train_' + key] = float(np.mean(value[-opt.nbatch_train:]))
+                log[i][j][key] = float(np.mean(value[-opt.nbatch_train:]))
+            log[i][j]['train_batch'] = k
             model.eval()
             for k, batch in zip(vs, valLoader):
                 t = time.time()
                 loss_val = process_batch(batch, loss_val, i, k, 'val', t0)
                 t_optim += time.time() - t
             for key, value in loss_val.items():
-                log[i][j]['val_' + key] = float(np.mean(value[-opt.nbatch_val:]))
+                log[i][j][key] = float(np.mean(value[-opt.nbatch_val:]))
+            # optionally update LR after each epoch/minibatch
+            model.lr_step()
             utils.checkpoint('%d_%d' %(i, j), model, log, opt)
             log[i][j]['time(optim)'] = '%.2f(%.2f)' %(time.time() - t0, t_optim)
             print(log[i][j])

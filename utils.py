@@ -84,6 +84,23 @@ def bev_batch_viz(batch):
     targets = targets.view(d1 * d2, d3).cpu().numpy()
     return tmp, targets
 
+def make_gif(files, name):
+    from moviepy.editor import ImageSequenceClip
+    clip = ImageSequenceClip(files, fps=5)
+    clip.write_gif("{name}".format(name=name), fps=5)
+
+def bev_crop_viz(batch):
+    # x is [35, 48, 48]
+    x = batch[0][0]
+    # bt is [1, 48]
+    binary_target = batch[1]['binary_target'][0].unsqueeze(0) * 255
+        
+    tmp = x[0,:,:] * 255
+    for i in range(1,x.shape[0]):
+        tmp |= (x[i,:,:] * 255)
+    tmp = tmp.cpu().numpy()
+    return tmp
+
 def Viz(opt):
     """Visualization"""
     if opt.visdom:
