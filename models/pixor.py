@@ -8,39 +8,94 @@ import torch.optim as optim
 from .model import Model
 from .cls import CyclicLR
 
+class MVPIXOR(Model):
+    """ Multi-view PIXOR """
+    def __init__(self, opt, test=False):
+        self.__name__ = 'mvpixor'
+        if opt.pixor_head == "full":
+            self.bev_pixor = PIXOR(opt, 'BEV')
+            self.fv_pixor = PIXOR(opt, 'FV')
+        else:
+            self.bev_pixor = PIXORBinary(opt, 'BEV')
+            self.fv_pixor = PIXORBinary(opt, 'FV')
+
+    def load_state_dict(self, x, set_):
+        # TODO: separate x into two dicts
+        bev_state_dict, fv_state_dict = {}, {}
+        for k,v in x.items():
+            if 'bev_pixor' in k:
+                bev_state_dict[k] = v
+            elif 'fv_pixor' in k:
+                fv_state_dict[k] = v
+            self.bev_pixor.load_state_dict(bev_state_dict, set_)
+            self.fv_pixor.load_state_dict(fv_state_dict, set_)
+    
+    def state_dict(self):
+        return {**self.bev_pixor, **self.fv_pixor}
+
+    def parameters(self):
+        return {**self.bev_pixor.parameters(), **self.fv_pixor.parameters()}
+
+    def train(self):
+        self.bev_pixor.train()
+        self.fv_pixor.train()
+
+    def eval(self):
+        self.bev_pixor.eval()
+        self.fv_pixor.eval()
+
+    def lr_step(self):
+        self.bev_pixor.lr_step()
+        self.fv_pixor.lr_step()
+
+    def step(self, batch, set_):
+        r1 = self.bev_pixor.step(batch, set_, 'BEV')
+        r2 = self.fv_pixor.step(batch, set_, 'FV')
+        return {**r1, **r2}
+
+    def gpu(self):
+        self.bev_pixor.gpu()
+        self.fv_pixor.gpu()
+
+    def output(self):
+        o1 = self.bev_pixor.output()
+        o2 = self.fv_pixor.output()
+        return np.concatenate([o1, o2], axis=0)
+
 class PIXOR(Model):
     """
     Separate model (the IntPhys model API) and PIXORNet to use nn.DataParallel :( 
     """
-    def __init__(self, opt, test=False):
+    def __init__(self, opt, view=None, test=False):
         super(Model).__init__()
         self.__name__ = 'pixor'
-        self.x_dim = opt.bev_dims[0] # width
-        self.y_dim = opt.bev_dims[1] # height
-        self.z_dim = opt.bev_dims[2] # channels
-        self.target_x_dim = 63
-        self.target_y_dim = 87
+        view = opt.view if view is None else view
+        self.x_dim = opt.view_dims[view][0] # width
+        self.y_dim = opt.view_dims[view][1] # height
+        self.z_dim = opt.view_dims[view][2] # channels
+        self.target_x_dim = opt.target_view_dims[view][0]
+        self.target_y_dim = opt.target_view_dims[view][1]
         self.conf_thresh = opt.conf_thresh
         self.ball_radius = opt.ball_radius
         self.IOU_thresh = opt.IOU_thresh
         self.bsz = 1 if test else opt.bsz
-        self.pixor = PIXORNet(opt)
+        self.pixor = PIXORNet(opt, view)
         # stuff for forward pass
         # N C H W format for Pytorch
         self.input = Variable(torch.FloatTensor(self.bsz, self.z_dim, self.y_dim, self.x_dim))
-        self.regression_target = Variable(torch.FloatTensor(self.bsz, 3, 
+        self.regression_target = Variable(torch.FloatTensor(self.bsz, 2, 
             self.target_x_dim * self.target_y_dim))
         self.binary_class_target = Variable(torch.FloatTensor(self.bsz, 1,
             self.target_x_dim * self.target_y_dim))
-        self.categorical_target = Variable(torch.FloatTensor(
-            self.bsz * self.target_x_dim * self.target_y_dim, 1))
+        #self.categorical_target = Variable(torch.FloatTensor(
+        #    self.bsz * self.target_x_dim * self.target_y_dim, 1))
         self.input.pin_memory()
         self.regression_target.pin_memory()
         self.binary_class_target.pin_memory()
         self.categorical_target.pin_memory()
         # optimization
         self.smoothL1 = nn.SmoothL1Loss()
-        self.nll = nn.NLLLoss()
+        #self.nll = nn.NLLLoss()
         self.optimizer = optim.SGD(self.pixor.parameters(), lr=opt.lr, momentum=0.9)
         #self.optim_scheduler = CyclicLR(self.optimizer, base_lr=0.0001, max_lr=0.001, step_size=int(opt.nbatch_train / 2.))
         self.optim_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=[3, 6], gamma=0.1)
@@ -76,37 +131,38 @@ class PIXOR(Model):
         #self.optim_scheduler.batch_step()
         self.optim_scheduler.step()
 
-    def step(self, batch, set_):
+    def step(self, batch, set_, view):
         """
         Args:
             batch[0] is batch of input maps of size [N,C,H,W]
             batch[1]['regression_target'] is regression targets of size [N,3,H,W]
             batch[1]['binary_target'] is binary class target of size [N,1,H,W]
-            batch[1]['z_target'] is categorical target of size [N,1,H,W]
+            -- DEPRECATED: batch[1]['z_target'] is categorical target of size [N,1,H,W]
         """
         if set_ == 'train':
             env = torch.enable_grad
         else:
             env = torch.no_grad
         with env():
-            self.input.data.copy_(batch[0].squeeze())
+            self.input.data.copy_(batch[0][view].squeeze())
             # flatten last two dimensions
-            self.regression_target.data.copy_(batch[1]['regression_target'].view(
-                self.bsz, 3, self.target_x_dim * self.target_y_dim))
-            self.binary_class_target.data.copy_(batch[1]['binary_target'].view(
+            self.regression_target.data.copy_(batch[1][view]['regression_target'].view(
+                self.bsz, 2, self.target_x_dim * self.target_y_dim))
+            self.binary_class_target.data.copy_(batch[1][view]['binary_target'].view(
                 self.bsz, 1, self.target_x_dim * self.target_y_dim))
-            self.categorical_target.data.copy_(batch[1]['z_target'].view(
-                self.bsz * self.target_x_dim * self.target_y_dim, 1))
-            self.reg_out, self.binary_out, self.cat_out = self.pixor(self.input)
+            #self.categorical_target.data.copy_(batch[1]['z_target'].view(
+            #    self.bsz * self.target_x_dim * self.target_y_dim, 1))
+            #self.reg_out, self.binary_out, self.cat_out = self.pixor(self.input)
+            self.reg_out, self.binary_out = self.pixor(self.input)
             binary_classification_loss = self.focal_loss(self.binary_out, self.binary_class_target)
             # If there are no objects in the scene, no regression or cat loss
             if not self.binary_class_target.byte().any():
                 total_loss = binary_classification_loss
-                result = {'{}_total_loss'.format(set_): total_loss.item(),
-                        '{}_binary_classification_loss'.format(set_): binary_classification_loss.item()}
+                result = {'{}_{}_total_loss'.format(view, set_): total_loss.item(),
+                        '{}_{}_binary_classification_loss'.format(view, set_): binary_classification_loss.item()}
             else:
                 # regression loss only computed over positive samples
-                reg_out = self.reg_out.view(self.bsz, 3, self.target_x_dim * self.target_y_dim)
+                reg_out = self.reg_out.view(self.bsz, 2, self.target_x_dim * self.target_y_dim)
                 # zero out predictions not at positive samples
                 reg_out = reg_out * self.binary_class_target
                 regression_loss = self.smoothL1(reg_out, self.regression_target)
@@ -114,45 +170,47 @@ class PIXOR(Model):
                 # zero out predictions not a positive samples
                 # channel-wise softmax, in shape [N,C] (9 classes)
                 # TODO: don't hardcode 9
-                cat_out = self.cat_out.view(-1, 9)
-                binary_target_flat = self.binary_class_target.view(-1)
+                #cat_out = self.cat_out.view(-1, 9)
+                #binary_target_flat = self.binary_class_target.view(-1)
                 # select only positive samples
-                cat_out = cat_out[binary_target_flat.byte()]
-                cat_target_out = self.categorical_target[binary_target_flat.byte()]
-                height_logits = F.log_softmax(cat_out, dim=1)
-                categorical_loss = self.nll(height_logits, cat_target_out.long().squeeze())
-                total_loss = binary_classification_loss + regression_loss + categorical_loss
-                result = {'{}_regression_loss'.format(set_): regression_loss.item(),
-                        '{}_binary_classification_loss'.format(set_): binary_classification_loss.item(),
-                        '{}_categorical_loss'.format(set_): categorical_loss.item(),
-                        '{}_total_loss'.format(set_): total_loss.item()}
+                #cat_out = cat_out[binary_target_flat.byte()]
+                #cat_target_out = self.categorical_target[binary_target_flat.byte()]
+                #height_logits = F.log_softmax(cat_out, dim=1)
+                #categorical_loss = self.nll(height_logits, cat_target_out.long().squeeze())
+                #total_loss = binary_classification_loss + regression_loss + categorical_loss
+                total_loss = binary_classification_loss + regression_loss
+                result = {'{}_{}_regression_loss'.format(view, set_): regression_loss.item(),
+                        '{}_{}_binary_classification_loss'.format(view, set_): binary_classification_loss.item(),
+                #        '{}_categorical_loss'.format(set_): categorical_loss.item(),
+                        '{}_{}_total_loss'.format(view, set_): total_loss.item()}
             if set_ == 'train':
                 self.pixor.zero_grad()
                 total_loss.backward()
                 self.optimizer.step()
-            return result 
+            return result
     
     def gpu(self):
         self.pixor.cuda()
         self.input = self.input.cuda(async=True)
         self.regression_target = self.regression_target.cuda(async=True)
         self.binary_class_target = self.binary_class_target.cuda(async=True)
-        self.categorical_target = self.categorical_target.cuda(async=True)
+        #self.categorical_target = self.categorical_target.cuda(async=True)
 
     def output(self):
         with torch.no_grad():
             po = self.binary_out[0].sigmoid()
             bo = po.round() * 255
             po *= 255
-            _, co = torch.max(F.softmax(self.cat_out[0,:]), dim=0)
-            co = co.float() * (255 / 9.)
-            cat1 = torch.cat([po, bo, self.reg_out[0], co.unsqueeze(0)], 0)
+            #_, co = torch.max(F.softmax(self.cat_out[0,:]), dim=0)
+            #co = co.float() * (255 / 9.)
+            #cat1 = torch.cat([po, bo, self.reg_out[0], co.unsqueeze(0)], 0)
+            cat1 = torch.cat([po, bo, self.reg_out[0]], 0)
             d1, d2, d3 = cat1.shape
             cat1 = cat1.view(d1 * d2, d3).cpu().numpy()
             return cat1
 
     
-    def predict(self, x, depth2bev):
+    def predict(self, x, view, depth2bev):
         """
         TODO: Get rid of depth2bev arg
 
@@ -163,13 +221,14 @@ class PIXOR(Model):
             x: [1,35,250,348] BEV map of scene
         """
         with torch.no_grad():
-            frame = x[0]['BEV'].squeeze()
-            regression_target = x[1]['regression_target'].squeeze()
+            frame = x[0][view].squeeze()
+            regression_target = x[1][view]['regression_target'].squeeze()
             self.input.data.copy_(frame)
-            reg_out, binary_out, cat_out = self.pixor(self.input)
+            #reg_out, binary_out, cat_out = self.pixor(self.input)
+            reg_out, binary_out = self.pixor(self.input)
             reg_out = reg_out.squeeze()
             binary_out = binary_out.squeeze()
-            cat_out = cat_out.squeeze()
+            #cat_out = cat_out.squeeze()
             # compute confidence scores
             conf_scores = binary_out.sigmoid()
             # assume this is [N,2], where N is the # of pixels
@@ -178,31 +237,30 @@ class PIXOR(Model):
             for i, p in enumerate(pixels):
                 dxs = reg_out[0][p[0], p[1]]
                 dys = reg_out[1][p[0], p[1]]
-                dzs = reg_out[2][p[0], p[1]]
+                #dzs = reg_out[2][p[0], p[1]]
                 # gt
                 gt_dxs = regression_target[0][p[0], p[1]]
                 gt_dys = regression_target[1][p[0], p[1]]
-                gt_dzs = regression_target[2][p[0], p[1]]
-                if gt_dxs != 0.0 and gt_dys != 0.0 and gt_dzs != 0.0:
+                #gt_dzs = regression_target[2][p[0], p[1]]
+                #if gt_dxs != 0.0 and gt_dys != 0.0 and gt_dzs != 0.0:
+                if gt_dxs != 0.0 and gt_dys != 0.0:
                     print("dx = {}, gt dx = {}".format(dxs, gt_dxs))
                     print("dy = {}, gt dy = {}".format(dys, gt_dys))
-                    print("dz = {}, gt dz = {}".format(dzs, gt_dzs))
+                    #print("dz = {}, gt dz = {}".format(dzs, gt_dzs))
                 
                 # do \sigma * dx + \mu to add back regression stats
-                ds = [dxs, dys, dzs]
+                #ds = [dxs, dys, dzs]
+                ds =  [dxs, dys]
                 for j in range(len(ds)):
                     ds[j] = depth2bev.regression_stats[j][1] * ds[j] + depth2bev.regression_stats[j][0]
                 # decode pixels
-                _, k = torch.max(F.softmax(cat_out[:,p[0], p[1]]), dim=0)
+                #_, k = torch.max(F.softmax(cat_out[:,p[0], p[1]]), dim=0)
                 # pixels is [height x width], so [j, i]
-                x, y, z = depth2bev.grid_cell_2_point(p[1], p[0], scale=4, k=k)
+                x, y = depth2bev.grid_cell_2_point(p[1], p[0], scale=4, view=view)
                 dets[i,0] = (x.double().cpu() + ds[0]).numpy()
                 dets[i,1] = (y.double().cpu() + ds[1]).numpy()
-                dets[i,2] = (z.double().cpu() + ds[2]).numpy()
-                #dets[i,0] = (x.float()).cpu().numpy()
-                #dets[i,1] = (y.float()).cpu().numpy()
-                #dets[i,2] = (z.float()).cpu().numpy()
-                dets[i,3] = conf_scores[p[0], p[1]].cpu().numpy()
+                #dets[i,2] = (z.double().cpu() + ds[2]).numpy()
+                dets[i,2] = conf_scores[p[0], p[1]].cpu().numpy()
             return self.NMS(dets), conf_scores
     
     # TODO: test
@@ -279,14 +337,15 @@ class PIXOR(Model):
         return F.binary_cross_entropy_with_logits(x_, t, w)
 
 class PIXORBinary(Model):
-    def __init__(self, opt, test=False):
+    def __init__(self, opt, view=None, test=False):
         super(Model).__init__()
         self.__name__ = 'pixorbinary'
-        self.x_dim = opt.bev_dims[0] # width
-        self.y_dim = opt.bev_dims[1] # height
-        self.z_dim = opt.bev_dims[2] # channels
+        self.view = opt.view if view is None else view
+        self.x_dim = opt.view_dims[self.view][0] # width
+        self.y_dim = opt.view_dims[self.view][1] # height
+        self.z_dim = opt.view_dims[self.view][2] # channels
         self.bsz = 1 if test else opt.bsz
-        self.pixor = PIXORNet(opt)
+        self.pixor = PIXORNet(opt, self.view)
         # stuff for forward pass
         # N C H W format for Pytorch
         self.input = Variable(torch.FloatTensor(self.bsz, self.z_dim, 48, 48))
@@ -323,28 +382,28 @@ class PIXORBinary(Model):
     def step(self, batch, set_):
         """
         Args:
-            batch[0] is batch of input maps of size [N,C,H,W]
-            batch[1]['binary_target'] is binary class target of size [N,1]
+            batch[0][view] is batch of input maps of size [N,C,H,W]
+            batch[1][view]['binary_target'] is binary class target of size [N,1]
         """
         if set_ == 'train':
             env = torch.enable_grad
         else:
             env = torch.no_grad
         with env():
-            self.input.data.copy_(batch[0].squeeze())
-            self.binary_class_target.data.copy_(batch[1]['binary_target'].view(self.bsz, 1))
+            self.input.data.copy_(batch[0][self.view].squeeze())
+            self.binary_class_target.data.copy_(batch[1][self.view]['binary_target'].view(self.bsz, 1))
             self.logits = self.pixor(self.input)
             binary_loss = self.loss(self.logits, self.binary_class_target)
             if set_ == 'train':
                 self.pixor.zero_grad()
                 binary_loss.backward()
                 self.optimizer.step()
-                result = {'{}_BCEWithLogitsLoss'.format(set_): binary_loss.item()}
+                result = {'{}_{}_BCEWithLogitsLoss'.format(self.view, set_): binary_loss.item()}
             else:
                 predictions = (self.logits.sigmoid() > 0.5).float()
                 acc = (1 - torch.abs(predictions - self.binary_class_target).mean()) * 100.
-                result = {'{}_BCEWithLogitsLoss'.format(set_): binary_loss.item(),
-                        '{}_pred_acc'.format(set_): acc.item()}
+                result = {'{}_{}_BCEWithLogitsLoss'.format(self.view, set_): binary_loss.item(),
+                        '{}_{}_pred_acc'.format(self.view, set_): acc.item()}
             return result
 
     def gpu(self):
@@ -361,12 +420,12 @@ class PIXORNet(nn.Module):
     stride 1 or 2, use padding of 1 to preserve dimensions!
     """
 
-    def __init__(self, opt):
+    def __init__(self, opt, view):
         super(PIXORNet, self).__init__()
         # Initial processing by 2 Conv2d layers with
         # 3x3 kernel, stride 1, padding 1
         self.block1 = nn.Sequential(
-            nn.Conv2d(opt.bev_dims[2], 32, 3, 1, 1),
+            nn.Conv2d(opt.view_dims[view][2], 32, 3, 1, 1),
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(32),
             nn.Conv2d(32, 32, 3, 1, 1),
@@ -385,7 +444,6 @@ class PIXORNet(nn.Module):
         #self.block4_6 = nn.Conv2d(256, 128, 1, 1)
         #self.block3_7 = nn.Conv2d(192, 96, 1, 1)
         self.pixor_head = opt.pixor_head
-        self.freeze_lower = opt.freeze_lower
         # Head network
         self.header = nn.Sequential(
             #nn.Conv2d(96, 96, 3, 1, 1),
@@ -406,10 +464,10 @@ class PIXORNet(nn.Module):
             # this can be directly interpreted as logits for Sigmoid
             self.binary_class_out = nn.Conv2d(96, 1, 3, 1, 1)
             # dx, dy, dz offsets
-            self.regression_out = nn.Conv2d(96, 3, 3, 1, 1)
+            self.regression_out = nn.Conv2d(96, 2, 3, 1, 1)
             # multi-class classification for z-dimension occupation
             # this can be directly interpreted as logits for Softmax2d
-            self.categorical_out = nn.Conv2d(96, 9, 3, 1, 1)
+            #self.categorical_out = nn.Conv2d(96, 9, 3, 1, 1)
         elif opt.pixor_head == "binary":
             # single scalar output for binary classification
             self.out1 = nn.Sequential(
@@ -457,32 +515,27 @@ class PIXORNet(nn.Module):
         x: input tensor of [bsz, C, H, W], where C=35,
           H=250, W=348
         """
-        if self.freeze_lower:
-            env = torch.no_grad
-        else:
-            env = torch.enable_grad
-        with env():
-            # Backbone network
-            x = self.block1(x)
-            # input [32,250,348]
-            # output [96,125,174]
-            x = self.block2(x)
-            # output [192,63,87]
-            x = self.block3(x)
-            # output [256,32,44]
-            #x4 = self.block4(x3)
-            # output [384,16,22]
-            #x = self.block5(x4)
-            # Upsampling fusion
-            # output [196, 16,22]
-            #x = self.u_bend(x)
-            # output is [128,32,44]
-            #x = self.block4_6(x4) + self.block6(x)
-            # output is [96,63,87]
-            #x = self.block3_7(x3) + self.block7(x)
+        # Backbone network
+        x = self.block1(x)
+        # input [32,250,348]
+        # output [96,125,174]
+        x = self.block2(x)
+        # output [192,63,87]
+        x = self.block3(x)
+        # output [256,32,44]
+        #x4 = self.block4(x3)
+        # output [384,16,22]
+        #x = self.block5(x4)
+        # Upsampling fusion
+        # output [196, 16,22]
+        #x = self.u_bend(x)
+        # output is [128,32,44]
+        #x = self.block4_6(x4) + self.block6(x)
+        # output is [96,63,87]
+        #x = self.block3_7(x3) + self.block7(x)
 
-            # Head network
-            x = self.header(x)
+        # Head network
+        x = self.header(x)
         # [1,63,87] - 0-1 class logits
         if self.pixor_head == "binary":
             x = self.out1(x)
@@ -494,8 +547,8 @@ class PIXORNet(nn.Module):
             r = self.regression_out(x)
             # [9,63,87] - categorical logits
             # ceil(35 / 4) = 9
-            m = self.categorical_out(x)
-            return r, c, m
+            #m = self.categorical_out(x)
+            return r, c
 
 if __name__ == '__main__':
     

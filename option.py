@@ -82,9 +82,11 @@ def make(parser):
     parser.add_argument('--target_real', type=float, default=0.9)
     parser.add_argument('--target_fake', type=float, default=0)
    
+    
     parser.add_argument('--pixor_head', type=str, default="full")
-    parser.add_argument('--freeze_lower', action='store_true')
+    parser.add_argument('--view', type=str, default="BEV", help="BEV|FV|Multi")
     parser.add_argument('--bev_dims', nargs='+', type=int, default=[348, 250, 35])
+    parser.add_argument('--fv_dims', nargs='+', type=int, default=[348, 80, 35])
     parser.add_argument('--conf_thresh', type=float, default=0.6)
     parser.add_argument('--IOU_thresh', type=float, default=0.5)
     parser.add_argument('--ball_radius', type=float, default=60)
@@ -115,6 +117,6 @@ def make(parser):
         opt.checkpoint = os.path.join(opt.checkpoint, opt.name + append)
 
     opt.m = opt.n_frames - max(opt.input_seq[-1], opt.target_seq[-1]) - int(opt.residual) + 1
-
+    opt.view_dims = {'BEV': opt.bev_dims, 'FV': opt.fv_dims}
     return opt
 

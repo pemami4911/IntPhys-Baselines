@@ -9,6 +9,7 @@ import utils
 from tqdm import tqdm
 from point_cloud import Depth2BEV
 import time
+import lmdb
 
 class SubsetSampler(torch.utils.data.sampler.Sampler):
     def __init__(self, indices):
@@ -101,12 +102,14 @@ class IntPhys(torch.utils.data.Dataset):
             # if odd, negative example
             if label:
                 if idx % 2 == 1:
-                    return {'binary_target': np.array([0.])}
+                    x = {'binary_target': np.array([0.])}
+                    return {'BEV': x, 'FV': x}
                 else:
-                    return {'binary_target': np.array([1.])}
+                    x = {'binary_target': np.array([1.])}
+                    return {'BEV': x, 'FV': x}
             else:
                 with open('%s/annotations/%03d.txt' %(video_path, idx), 'r') as f:
-                    max_depth = float(f.readline())
+                    result = {}
                     # this cast to np.float32 is very important...
                     depth_img = np.float32(scipy.misc.imread(
                         '%s/depth/depth_%03d.png' %(video_path, idx)))
@@ -114,65 +117,72 @@ class IntPhys(torch.utils.data.Dataset):
                     # need to rescale objects
                     pc = self.depth2bev.depth_2_point_cloud(depth_img)
                     # Note that this BEV map is already in PyTorch CHW format
-                    bev, offsets = self.depth2bev.point_cloud_2_BEV(pc)
-                    c, h, w = bev.shape
+                    bev, offsets = self.depth2bev.point_cloud_2_view(pc, view='BEV')
                     self.last_offsets = offsets
+                    fv, _ = self.depth2bev.point_cloud_2_view(pc, view='FV')
                     gt_objects = []
-                    for line in f:
-                        pos = np.array(list(map(float, line.split(" "))))
-                        rescaled_pos = self.depth2bev.backproject_and_rescale(
-                                pos, self.depth2bev.fixed_depth / max_depth)
-                        for r in range(3): rescaled_pos[r] += self.last_offsets[r]
-                        # pixel location of the object
-                        i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=1)
-                        # if object is in view
-                        if 0 <= i < w and 0 <= j < h:
-                            gt_objects.append((i,j))
                     # grab occluders too
                     gt_occluders = []
                     _, _, occluders = self.depth2bev.parse_status('%s/status.json' %(video_path))
                     frame = occluders[idx-1]
-                    for pos in frame:
-                        rescaled_pos = self.depth2bev.backproject_and_rescale(
-                                pos, self.depth2bev.fixed_depth / max_depth)
-                        for r in range(3): rescaled_pos[r] += self.last_offsets[r]
-                        # pixel location of the object
-                        i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=1)
-                        # if object is in view
-                        if 0 <= i < w and 0 <= j < h:
-                            gt_occluders.append((i,j))
-                    # if positive
-                    if idx % 2 == 0 and len(gt_objects) > 0:
-                        # extract a 48 x 48 crop around a random item in the video
-                        final_crop = extract_random_image_patch(gt_objects, bev)
-                    # negative examples
-                    elif idx % 2 == 1 or (idx % 2 == 0 and len(gt_objects) == 0):
-                        # If there is an occluder, randomly sample patch from it, otherwise use a random patch
-                        if len(gt_occluders) > 0:
-                            final_crop = extract_random_image_patch(gt_occluders, bev)
-                        else:
-                            # Sample a 48x48 patch from the image that doesn't overlap gt patches
-                            done = False
-                            while not done:
-                                i = np.random.randint(24, w-24)
-                                j = np.random.randint(24, h-24)
-                                if len(gt_objects) == 0:
-                                    done = True
-                                else:
-                                    for obj in gt_objects:
-                                        gt_i = obj[0]; gt_j = obj[1];
-                                        if abs(gt_i - i) > 24 and abs(gt_j - j) > 24:
-                                            done = True
-                            h_min = max(0, j-24); h_max = min(h-1, j+24)
-                            w_min = max(0, i-24); w_max = min(w-1, i+24)
-                            crop = bev[:, h_min:h_max, w_min:w_max]
-                            crop_c, crop_h, crop_w = crop.shape
-                            # randomly flip
-                            if np.random.uniform() < 0.5:
-                                for r in range(crop_c):
-                                    crop[r] = np.flipud(crop[r]).copy()
-                            final_crop = crop
-                    return final_crop
+                    for vidx, (v, grid) in enumerate(zip(['BEV', 'FV'], [bev, fv])):
+                        f.seek(0)
+                        max_depth = float(f.readline())
+                        gt_objects.append([])
+                        gt_occluders.append([])
+                        c, h, w = grid.shape 
+                        for line in f:
+                            pos = np.array(list(map(float, line.split(" "))))
+                            rescaled_pos = self.depth2bev.backproject_and_rescale(
+                                    pos, self.depth2bev.fixed_depth / max_depth)
+                            for r in range(3): rescaled_pos[r] += self.last_offsets[r]
+                            # pixel location of the object
+                            i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=1, view=v)
+                            # if object is in view
+                            if 0 <= i < w and 0 <= j < h:
+                                gt_objects[vidx].append((i,j))
+                        for pos in frame:
+                            rescaled_pos = self.depth2bev.backproject_and_rescale(
+                                    pos, self.depth2bev.fixed_depth / max_depth)
+                            for r in range(3): rescaled_pos[r] += self.last_offsets[r]
+                            # pixel location of the object
+                            i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=1, view=v)
+                            # if object is in view
+                            if 0 <= i < w and 0 <= j < h:
+                                gt_occluders[vidx].append((i,j))
+                        # if positive
+                        if idx % 2 == 0 and len(gt_objects[vidx]) > 0:
+                            # extract a 48 x 48 crop around a random item in the video
+                            final_crop = extract_random_image_patch(gt_objects[vidx], grid)
+                        # negative examples
+                        elif idx % 2 == 1 or (idx % 2 == 0 and len(gt_objects[vidx]) == 0):
+                            # If there is an occluder, randomly sample patch from it, otherwise use a random patch
+                            if len(gt_occluders[vidx]) > 0:
+                                final_crop = extract_random_image_patch(gt_occluders[vidx], grid)
+                            else:
+                                # Sample a 48x48 patch from the image that doesn't overlap gt patches
+                                done = False
+                                while not done:
+                                    i = np.random.randint(24, w-24)
+                                    j = np.random.randint(24, h-24)
+                                    if len(gt_objects[vidx]) == 0:
+                                        done = True
+                                    else:
+                                        for obj in gt_objects[vidx]:
+                                            gt_i = obj[0]; gt_j = obj[1];
+                                            if abs(gt_i - i) > 24 and abs(gt_j - j) > 24:
+                                                done = True
+                                h_min = max(0, j-24); h_max = min(h-1, j+24)
+                                w_min = max(0, i-24); w_max = min(w-1, i+24)
+                                crop = grid[:, h_min:h_max, w_min:w_max]
+                                crop_c, crop_h, crop_w = crop.shape
+                                # randomly flip
+                                if np.random.uniform() < 0.5:
+                                    for r in range(crop_c):
+                                        crop[r] = np.flipud(crop[r]).copy()
+                                final_crop = crop
+                        result[v] = final_crop
+                    return result
 
         def load_BEV(idx, label):
             # The output BEV prediction maps is downsampled
@@ -180,10 +190,6 @@ class IntPhys(torch.utils.data.Dataset):
             pixor_downsample = 4
             idx += 1
             if not label:
-                if np.random.uniform() < 0.5:
-                    self.last_flip = True
-                else:
-                    self.last_flip = False
                 # this cast to np.float32 is very important...
                 depth_img = np.float32(scipy.misc.imread(
                     '%s/depth/depth_%03d.png' %(video_path, idx)))
@@ -191,58 +197,88 @@ class IntPhys(torch.utils.data.Dataset):
                 # need to rescale objects
                 pc = self.depth2bev.depth_2_point_cloud(depth_img)
                 # Note that this BEV map is already in PyTorch CHW format
-                bev, offsets = self.depth2bev.point_cloud_2_BEV(pc)
+                bev, offsets = self.depth2bev.point_cloud_2_view(pc, view='BEV')
                 self.last_offsets = offsets
+                fv, _ = self.depth2bev.point_cloud_2_view(pc, view='FV')
+                if np.random.uniform() < 0.5:
+                    self.last_flip = True
+                else:
+                    self.last_flip = False
                 if self.last_flip and not self.test:
                     for r in range(bev.shape[0]):
                         bev[r] = np.flipud(bev[r]).copy()
+                    for r in range(fv.shape[0]):
+                        fv[r] = np.flipud(fv[r]).copy()
                 if self.test:
-                    return {'BEV': bev, 'point_cloud': pc}
+                    return {'BEV': bev, 'FV': fv, 'point_cloud': pc}
                 else:
-                    return bev
+                    return {'BEV': bev, 'FV': fv}
             else:
                 with open('%s/annotations/%03d.txt' %(video_path, idx), 'r') as f:
                     max_depth = float(f.readline())
+                    # BEV 
                     # 87
                     grid_x = int(np.ceil((self.depth2bev.bev_x_dim / self.depth2bev.bev_x_res) / pixor_downsample))
                     # 63
                     grid_y = int(np.ceil((self.depth2bev.bev_y_dim / self.depth2bev.bev_y_res) / pixor_downsample))
-                    # 9
-                    grid_z = int(np.ceil(self.depth2bev.bev_z_channels / pixor_downsample))
-                    # Use H x W for easy integration with PyTorch
-                    binary_map = np.zeros((grid_y, grid_x))
-                    height_map = np.zeros((grid_y, grid_x))
-                    regression_map = np.zeros((3, grid_y, grid_x))                     
-                    for line in f:
-                        pos = np.array(list(map(float, line.split(" "))))
-                        rescaled_pos = self.depth2bev.backproject_and_rescale(
-                                pos, self.depth2bev.fixed_depth / max_depth)
-                        for r in range(3): rescaled_pos[r] += self.last_offsets[r]
-                        # pixel location of the object
-                        i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=pixor_downsample)
-                        k = self.depth2bev.z_2_grid(rescaled_pos[2], scale=pixor_downsample)
-                        # set pixels in ~50 pixel radius to 1 (50 / 10 / 4 ~ 2)
-                        if 0 <= i < grid_x and 0 <= j < grid_y and 0 <= k < grid_z:
-                            if k < 0:
-                                print('%s/annotations/%03d.txt' %(video_path, idx), pos[2], rescaled_pos[2], k)
-                            c = (i, j) 
-                            px = utils.get_nearby_pixels(c, self.manhattan_dist, (grid_y, grid_x))
-                            for p in px: # positives
-                                binary_map[p[1], p[0]] = 1
-                                height_map[p[1], p[0]] = k
-                                # compute dx, dy, and dz for each grid cell in the set of positives 
-                                x, y, z = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, k=k)
-                                dx = rescaled_pos[0] - x; dy = rescaled_pos[1] - y; dz = rescaled_pos[2] - z
-                                for r,d in enumerate([dx, dy, dz]):
-                                    # normalize to N(0,1)
-                                    d = (d - self.depth2bev.regression_stats[r][0]) / self.depth2bev.regression_stats[r][1]
-                                    regression_map[r, p[1], p[0]] = d
-                    if self.last_flip:
-                        binary_map = np.flipud(binary_map).copy()
-                        height_map = np.flipud(height_map).copy()
-                        for r in range(3):
-                            regression_map[r] = np.flipud(regression_map[r]).copy()
-                    return {'binary_target': binary_map, 'z_target': height_map, 'regression_target': regression_map}
+                    bev_grid_dims = [grid_x, grid_y]
+                    # FV
+                    # 87
+                    grid_x = int(np.ceil((self.depth2bev.bev_x_dim / self.depth2bev.bev_x_res) / pixor_downsample))
+                    # 20
+                    grid_y = int(np.ceil((self.depth2bev.bev_z_dim / self.depth2bev.bev_z_res) / pixor_downsample))
+                    fv_grid_dims = [grid_x, grid_y]
+                    data = {}
+                    for view, grid_dims in zip(['BEV', 'FV'], [bev_grid_dims, fv_grid_dims]):
+                        data[view] = {}
+                        grid_x = grid_dims[0]; grid_y = grid_dims[1]
+                        # Use H x W for easy integration with PyTorch
+                        binary_map = np.zeros((grid_y, grid_x))
+                        #height_map = np.zeros((grid_y, grid_x))
+                        regression_map = np.zeros((2, grid_y, grid_x))                     
+                        for line in f:
+                            pos = np.array(list(map(float, line.split(" "))))
+                            rescaled_pos = self.depth2bev.backproject_and_rescale(
+                                    pos, self.depth2bev.fixed_depth / max_depth)
+                            for r in range(3): rescaled_pos[r] += self.last_offsets[r]
+                            # pixel location of the object
+                            i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=pixor_downsample, view=view)
+                            #k = self.depth2bev.z_2_grid(rescaled_pos[2], scale=pixor_downsample)
+                            # set pixels in ~50 pixel radius to 1 (50 / 10 / 4 ~ 2)
+                            if 0 <= i < grid_x and 0 <= j < grid_y: # check k
+                                #if k < 0:
+                                #    print('%s/annotations/%03d.txt' %(video_path, idx), pos[2], rescaled_pos[2], k)
+                                c = (i, j) 
+                                px = utils.get_nearby_pixels(c, self.manhattan_dist, (grid_y, grid_x))
+                                for p in px: # positives
+                                    binary_map[p[1], p[0]] = 1
+                                    #height_map[p[1], p[0]] = k
+                                    # compute dx, dy, and dz for each grid cell in the set of positives 
+                                    if view == 'BEV':
+                                        x, y = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, view=view)
+                                        dx = rescaled_pos[0] - x; dy = rescaled_pos[1] - y
+                                        rm_idx = 0
+                                        for r,d in zip([0, 1], [dx, dy]):
+                                            # normalize to N(0,1)
+                                            d = (d - self.depth2bev.regression_stats[r][0]) / self.depth2bev.regression_stats[r][1]
+                                            regression_map[rm_idx, p[1], p[0]] = d
+                                            rm_idx += 1
+                                    elif view == 'FV':
+                                        x, z = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, view=view)
+                                        dx = rescaled_pos[0] - x; dz = rescaled_pos[2] - z
+                                        rm_idx = 0
+                                        for r,d in zip([0, 2], [dx, dz]):
+                                            # normalize to N(0,1)
+                                            d = (d - self.depth2bev.regression_stats[r][0]) / self.depth2bev.regression_stats[r][1]
+                                            regression_map[rm_idx, p[1], p[0]] = d
+                                            rm_idx += 1
+                        if self.last_flip:      
+                            binary_map = np.flipud(binary_map).copy()
+                            for r in range(2):
+                                regression_map[r] = np.flipud(regression_map[r]).copy()
+                        data[view]['binary_target'] = binary_map
+                        data[view]['regression_map'] = regression_map
+                    return data
 
         def load(x, nc, start, seq, interp, c):
             out = []

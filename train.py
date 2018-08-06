@@ -90,8 +90,9 @@ def process_batch(batch, loss, i, k, set_, t0):
             img = to_plot
         elif opt.input == 'bev-crop':
             img = []
-            crop = utils.bev_crop_viz(batch)
-            img.append(crop)
+            bev_crop, fv_crop = utils.bev_crop_viz(batch)
+            #img.append(bev_crop)
+            img.append(fv_crop)
         viz(img, loss, i, k, nbatch, set_)
     return loss
 

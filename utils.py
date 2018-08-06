@@ -91,15 +91,20 @@ def make_gif(files, name):
 
 def bev_crop_viz(batch):
     # x is [35, 48, 48]
-    x = batch[0][0]
+    x1 = batch[0]['BEV'][0]
+    x2 = batch[0]['FV'][0]
     # bt is [1, 48]
-    binary_target = batch[1]['binary_target'][0].unsqueeze(0) * 255
+    #binary_target = batch[1]['BEV']['binary_target'][0].unsqueeze(0) * 255
         
-    tmp = x[0,:,:] * 255
-    for i in range(1,x.shape[0]):
-        tmp |= (x[i,:,:] * 255)
-    tmp = tmp.cpu().numpy()
-    return tmp
+    tmp = x1[0,:,:] * 255
+    for i in range(1,x1.shape[0]):
+        tmp |= (x1[i,:,:] * 255)
+    bev_tmp = tmp.cpu().numpy()
+    tmp = x2[0,:,:] * 255
+    for i in range(1,x2.shape[0]):
+        tmp |= (x2[i,:,:] * 255)
+    fv_tmp = tmp.cpu().numpy()
+    return bev_tmp, fv_tmp
 
 def Viz(opt):
     """Visualization"""

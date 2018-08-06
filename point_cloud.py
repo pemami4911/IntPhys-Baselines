@@ -29,9 +29,8 @@ class Depth2BEV:
   In PyTorch, this is 35 x 250 x 348 (NCHW format).
 
   """
-  def __init__(self, opt, image_dims=[288, 288], fovx=90, fovy=90, 
-      bev_x_res=10, bev_y_res=10, z_channels=35,
-      bev_dims=[3480, 2500, 800], fixed_depth=2500):
+  def __init__(self, opt, image_dims=[288, 288], pc_dims=[2500, 3480, 800], 
+      fovx=90, fovy=90, grid_x_res=10, grid_y_res=10, grid_z_res=10, fixed_depth=2500):
     self.frame_height = image_dims[0]
     self.frame_width = image_dims[1]
     self.camera_fov_x = fovx
@@ -42,12 +41,18 @@ class Depth2BEV:
     self.fy = 1 / ((2 / self.frame_height) * np.tan((self.camera_fov_y / 2) * np.pi / 180))
     self.cx = self.frame_width / 2
     self.cy = self.frame_height / 2
-    self.bev_x_res = bev_x_res
-    self.bev_y_res = bev_y_res
-    self.bev_z_channels = z_channels
-    self.bev_x_dim = bev_dims[0]
-    self.bev_y_dim = bev_dims[1]
-    self.bev_z_dim = bev_dims[2]
+    self.grid_x_res = grid_x_res
+    self.grid_y_res = grid_y_res
+    self.grid_z_res = grid_z_res
+    self.pc_x_dim = pc_dims[0]
+    self.pc_y_dim = pc_dims[1]
+    self.pc_z_dim = pc_dims[2]
+    self.bev_x_dim = opt.view_dims['BEV'][0]
+    self.bev_y_dim = opt.view_dims['BEV'][1]
+    self.grid_height_channels = opt.view_dims['BEV'][2]
+    self.fv_x_dim = opt.view_dims['FV'][0]
+    self.fv_y_dim = opt.view_dims['FV'][1]
+    self.grid_depth_channels = opt.view_dims['FV'][2]
     self.fixed_depth = fixed_depth
     self.ball_radius = opt.ball_radius
     self.regression_stats = []
@@ -208,45 +213,59 @@ class Depth2BEV:
       z = obj[0] * depth_ratio
       return np.array([z, z * u / self.fx, z * v / self.fy])
 
-  def point_2_grid_cell(self, point, scale=1):
+  def point_2_grid_cell(self, point, scale=1, view='BEV'):
     """
     Given an arbitrary point from the point cloud, return
     the i, j coords of its grid cell in the BEV map.
     """
     # in BEV, the x coord maps to the y-dim of point cloud
-    i = int(np.floor(point[1] / (self.bev_x_res * scale)))
-    j = int(np.floor(point[0] / (self.bev_y_res * scale)))
+    if view == 'BEV':
+        i_idx = 1; j_idx = 0
+    elif view == 'FV':
+        i_idx = 1; j_idx = 2
+    i = int(np.floor(point[i_idx] / (self.grid_x_res * scale)))
+    j = int(np.floor(point[j_idx] / (self.grid_y_res * scale)))
     return i, j
     
-  def grid_cell_2_point(self, i, j, scale=1, k=-1):
+  def grid_cell_2_point(self, i, j, scale=1, k=-1, view='BEV'):
     """
     Map grid cell i,j to the point in point cloud
     """
-    y = i * self.bev_x_res * scale
-    x = j * self.bev_y_res * scale
-    if k >= 0:
-        z = k * (self.bev_z_dim / self.bev_z_channels) * scale
-        return x, y, z
-    return x, y
+    if view == 'BEV':
+        y = i * self.grid_x_res * scale
+        x = j * self.grid_y_res * scale
+        if k >= 0:
+            z = k * (self.pc_z_dim / self.grid_height_channels) * scale
+            return x, y, z
+        return x, y
+    elif view == 'FV':
+        y = i * self.grid_x_res * scale
+        z = j * self.grid_z_res * scale
+        if k >= 0:
+            z = k * (self.pc_x_dim / self.grid_depth_channels) * scale
+            return x, y, z
+        return y, z
   
-  def z_2_grid(self, z, scale=1):
+  def z_2_grid(self, z, scale=1, view='BEV'):
     """ Map z of point to one of the discretized channels """ 
-    z_res = (scale * self.bev_z_dim) / self.bev_z_channels
+    if view == 'BEV':
+        z_res = (scale * self.pc_z_dim) / self.grid_height_channels
+    elif view == 'FV':
+        z_res = (scale * self.pc_x_dim ) / self.grid_depth_channels
     return int(np.floor(z / z_res))
 
-  def point_cloud_2_BEV(self, point_cloud):
+  def point_cloud_2_view(self, point_cloud, view='BEV'):
     """
-    Given a point cloud of shape (288, 288, 3), map to a BEV binary grid map.
+    Given a point cloud of shape (144, 144, 3), map to a BEV binary grid map.
     The map grid cells = 1 if any point maps to the cell, else 0.
     
     Each dimension given by self.bev_dim / self.bev_res
     """
-    grid_x_dim = np.ceil(self.bev_x_dim / self.bev_x_res)
-    grid_y_dim = np.ceil(self.bev_y_dim / self.bev_y_res)
-    bev_z_res = np.ceil(self.bev_z_dim / self.bev_z_channels)
-    #grid = np.zeros((int(grid_x_dim), int(grid_y_dim), int(self.bev_z_channels)), dtype=np.uint8)
-    # put in CHW format for PyTorch
-    grid = np.zeros((int(self.bev_z_channels), int(grid_y_dim), int(grid_x_dim)), dtype=np.uint8)
+    if view == 'BEV':
+      # put in CHW format for PyTorch
+      grid = np.zeros((self.grid_height_channels, self.bev_y_dim, self.bev_x_dim), dtype=np.uint8)
+    elif view == 'FV':
+      grid = np.zeros((self.grid_depth_channels, self.fv_y_dim, self.fv_x_dim), dtype=np.uint8)
     # partition by z dimension, and clean up point cloud
     offsets = []
     for i in range(3):
@@ -256,21 +275,26 @@ class Depth2BEV:
       else:
         offsets.append(0.)
     z_start = 0
+    if view == 'BEV':
+        p_idx = 2
+    elif view == 'FV':
+        p_idx = 0
     # TODO: Parallelize this for loop
-    for h in range(self.bev_z_channels):
-      z_end = z_start + bev_z_res
-      pts = point_cloud[(point_cloud[:,:,2] >= z_start) & (point_cloud[:,:,2] < z_end)]
+    iters = self.grid_height_channels if view == 'BEV' else self.grid_depth_channels
+    for h in range(iters):
+      z_end = z_start + self.grid_z_res
+      pts = point_cloud[(point_cloud[:,:,p_idx] >= z_start) & (point_cloud[:,:,p_idx] < z_end)]
       # compute grid cell for each point
       # TODO: Parallelize or vectorize?
       for p in pts:
         # throw out points at the camera
         if p[0] == 0.0:
           continue
-        i, j = self.point_2_grid_cell(p)
+        i, j = self.point_2_grid_cell(p, view=view)
         # throw out points outside of the grid
-        if i < grid_x_dim and j < grid_y_dim:
+        if i < grid.shape[2] and j < grid.shape[1]:
           grid[h, j, i] |= 1
-      z_start += bev_z_res
+      z_start += self.grid_z_res
     return grid, offsets
 
 if __name__ == '__main__':
