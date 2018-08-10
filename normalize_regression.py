@@ -14,6 +14,8 @@ from tqdm import tqdm
 def update_regression_stat(d, mean, var_Mk, var_Sk, k):
     d = d[d != 0.].numpy()
     M = len(d)
+    if k == 0 and M == 0:
+        return mean, var_Mk, var_Sk, k
     mean = (k/(k+M)) * mean + (np.sum(d) / (k+M))
     var_Mk_1 = var_Mk
     for i in range(len(d)):
@@ -22,7 +24,7 @@ def update_regression_stat(d, mean, var_Mk, var_Sk, k):
         k += 1
         var_Mk_1 = var_Mk + (d[i] - var_Mk)/k
         var_Sk += (d[i] - var_Mk) * (d[i] - var_Mk_1)
-    return mean, var_Mk_1, var_Sk, kf
+    return mean, var_Mk_1, var_Sk, k
 
 
 if __name__ == '__main__':
@@ -46,24 +48,24 @@ if __name__ == '__main__':
     mean_dz = 0.; var_dz_Mk = 0.; var_dz_Sk = 0.;
     # iterate over training and val sets and compute
     for b in tqdm(trainLoader):
-        regression = b[1]['regression_target']
+        regression = b[1]['FV']['regression_target']
         for t in range(opt.bsz):
             dxs = regression[t][0]
             dys = regression[t][1]
-            dzs = regression[t][2]
             mean_dx, var_dx_Mk, var_dx_Sk, k_dx \
                     = update_regression_stat(dxs, mean_dx, var_dx_Mk, var_dx_Sk, k_dx)
             mean_dy, var_dy_Mk, var_dy_Sk, k_dy \
                     = update_regression_stat(dys, mean_dy, var_dy_Mk, var_dy_Sk, k_dy)
-            mean_dz, var_dz_Mk, var_dz_Sk, k_dz \
-                    = update_regression_stat(dzs, mean_dz, var_dz_Mk, var_dz_Sk, k_dz)
-        counter += 1
-        if counter % 1000 == 0:
-            for x,y in zip([mean_dx, mean_dy, mean_dz], [var_dx_Sk/(k_dx - 1), \
-                    var_dy_Sk/(k_dy-1), var_dz_Sk/(k_dz-1)]):
-                print(x, y)
-    with open(opt.regression_statistics_file, 'w') as rs:
+            #mean_dz, var_dz_Mk, var_dz_Sk, k_dz \
+            #        = update_regression_stat(dzs, mean_dz, var_dz_Mk, var_dz_Sk, k_dz)
         for x,y in zip([mean_dx, mean_dy, mean_dz], [var_dx_Sk/(k_dx - 1), \
                 var_dy_Sk/(k_dy-1), var_dz_Sk/(k_dz-1)]):
-            rs.write("3 {} {}\n".format(x, y))
             print(x, y)
+        counter += 1
+        if counter % 1000 == 0:
+            with open(opt.regression_statistics_file, 'w') as rs:
+                for x,y in zip([mean_dx, mean_dy, mean_dz], [var_dx_Sk/(k_dx - 1), \
+                        var_dy_Sk/(k_dy-1), var_dz_Sk/(k_dz-1)]):
+                    rs.write("3 {} {}\n".format(x, y))
+                    print(x, y)
+            exit(0) 

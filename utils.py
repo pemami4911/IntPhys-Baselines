@@ -66,23 +66,33 @@ def bev_batch_viz(batch):
     """
     Prepare BEV batch contents for Vizdom
     """
-    # x is [35, 250, 348]
-    x = batch[0][0]
+    # x1 is [35, 250, 348]
+    x1 = batch[0]['BEV'][0]
+    x2 = batch[0]['FV'][0]
+
     # bt is [1, 63, 87]
-    binary_target = batch[1]['binary_target'][0].unsqueeze(0) * 255
+    bev_binary_target = batch[1]['BEV']['binary_target'][0].unsqueeze(0) * 255
+    fv_binary_target = batch[1]['FV']['binary_target'][0].unsqueeze(0) * 255
     # rt is [3, 63, 87]
-    regression_target = batch[1]['regression_target'][0] * 255
-    # ct is [1, 63, 87]
-    categorical_target = batch[1]['z_target'][0].unsqueeze(0) * (255 / 9.)
+    bev_regression_target = batch[1]['BEV']['regression_target'][0] * 255
+    fv_regression_target = batch[1]['FV']['regression_target'][0] * 255
         
-    tmp = x[0,:,:] * 255
-    for i in range(1,x.shape[0]):
-        tmp |= (x[i,:,:] * 255)
-    tmp = tmp.cpu().numpy()
-    targets = torch.cat([binary_target, regression_target, categorical_target], 0)
+    bev_tmp = x1[0,:,:] * 255
+    for i in range(1,x1.shape[0]):
+        bev_tmp |= (x1[i,:,:] * 255)
+    bev_tmp = bev_tmp.cpu().numpy()
+    fv_tmp = x2[0,:,:] * 255
+    for i in range(1,x2.shape[0]):
+        fv_tmp |= (x2[i,:,:] * 255)
+    fv_tmp = fv_tmp.cpu().numpy()
+
+    targets = torch.cat([bev_binary_target, bev_regression_target], 0)
     d1, d2, d3 = targets.shape
-    targets = targets.view(d1 * d2, d3).cpu().numpy()
-    return tmp, targets
+    bev_targets = targets.view(d1 * d2, d3).cpu().numpy()
+    targets = torch.cat([fv_binary_target, fv_regression_target], 0)
+    d1, d2, d3 = targets.shape
+    fv_targets = targets.view(d1 * d2, d3).cpu().numpy()
+    return bev_tmp, fv_tmp, bev_targets, fv_targets
 
 def make_gif(files, name):
     from moviepy.editor import ImageSequenceClip
@@ -93,9 +103,15 @@ def bev_crop_viz(batch):
     # x is [35, 48, 48]
     x1 = batch[0]['BEV'][0]
     x2 = batch[0]['FV'][0]
+    full = batch[0]['FV_full'][0]
+
     # bt is [1, 48]
-    #binary_target = batch[1]['BEV']['binary_target'][0].unsqueeze(0) * 255
-        
+    binary_target = batch[1]['FV']['binary_target'][0].cpu().numpy()
+    if binary_target == 1:
+        label = "Ball"
+    else:
+        label = "Background"
+
     tmp = x1[0,:,:] * 255
     for i in range(1,x1.shape[0]):
         tmp |= (x1[i,:,:] * 255)
@@ -104,7 +120,11 @@ def bev_crop_viz(batch):
     for i in range(1,x2.shape[0]):
         tmp |= (x2[i,:,:] * 255)
     fv_tmp = tmp.cpu().numpy()
-    return bev_tmp, fv_tmp
+    fv_full = full[0,:,:] * 255
+    for i in range(1,full.shape[0]):
+        fv_full |= (full[i,:,:] * 255)
+    fv_full = fv_full.cpu().numpy()
+    return bev_tmp, fv_tmp, fv_full, label
 
 def Viz(opt):
     """Visualization"""
@@ -123,11 +143,12 @@ def Viz(opt):
             )
         if opt.visdom and batch_idx % opt.visdom_interval == 0:
             options = {'title': 'Epoch %02d - %s - Batch %06d/%06d' %(epoch, set_, batch_idx, nbatch)}
-            for i,im in enumerate(img):
+            for i,(im,label) in enumerate(img):
                 vis.image(
                     img = im,
                     win = visdom_id + set_ + '-' + str(i),
-                    env = opt.name
+                    env = opt.name,
+                    opts=dict(title=label),
                 )
             for i,c in curve.items():
                 if len(c) > 1:

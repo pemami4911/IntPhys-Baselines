@@ -9,7 +9,7 @@ import utils
 from tqdm import tqdm
 from point_cloud import Depth2BEV
 import time
-import lmdb
+import pdb
 
 class SubsetSampler(torch.utils.data.sampler.Sampler):
     def __init__(self, indices):
@@ -22,12 +22,12 @@ class SubsetSampler(torch.utils.data.sampler.Sampler):
         return len(self.indices)
 
 class IntPhys(torch.utils.data.Dataset):
-
     def __init__(self, opt, split):
         self.opt = opt
         self.index = 0
         self.test = 'test' in split
         self.depth2bev = Depth2BEV(opt)
+        self.crop_sz = int(opt.crop_sz/2)
         if opt.list:
             self.file = os.path.join(opt.list, split + '.npy')
             self.paths = np.load(self.file).tolist()
@@ -59,6 +59,7 @@ class IntPhys(torch.utils.data.Dataset):
         self.manhattan_dist = 3
 
     def __getitem__(self, index):
+        
         video_idx = math.floor(index / self.opt.m)
         video_path = self._getpath(video_idx)
         frame_idx = index % self.opt.m
@@ -68,18 +69,18 @@ class IntPhys(torch.utils.data.Dataset):
             obj = obj_array[np.random.randint(0, len(obj_array))]
             i = obj[0]; j = obj[1]
             # randomly shift 
-            i += np.random.randint(-5, 5)
-            j += np.random.randint(-5, 5)
-            h_min = max(0, j-24); h_max = min(h-1, j+24)
-            w_min = max(0, i-24); w_max = min(w-1, i+24)
+            i += np.random.randint(-3, 3)
+            j += np.random.randint(-3, 3)
+            h_min = max(0, j-self.crop_sz); h_max = min(h-1, j+self.crop_sz)
+            w_min = max(0, i-self.crop_sz); w_max = min(w-1, i+self.crop_sz)
             crop = bev[:, h_min:h_max, w_min:w_max]
             # if crop is not 48x48, pad with zeros
             crop_c, crop_h, crop_w = crop.shape
-            final_crop = np.zeros((crop_c, 48, 48), dtype=np.uint8)
+            final_crop = np.zeros((crop_c, self.crop_sz*2, self.crop_sz*2), dtype=np.uint8)
             padding = []
             for chw in [crop_h, crop_w]:
-                if chw < 48:
-                    short = 48 - chw
+                if chw < self.crop_sz * 2:
+                    short = (self.crop_sz * 2) - chw
                     if short % 2 == 0:
                         pad_width = (int(short/2), int(short/2))
                     else:
@@ -120,6 +121,7 @@ class IntPhys(torch.utils.data.Dataset):
                     bev, offsets = self.depth2bev.point_cloud_2_view(pc, view='BEV')
                     self.last_offsets = offsets
                     fv, _ = self.depth2bev.point_cloud_2_view(pc, view='FV')
+                    result['FV_full'] = fv
                     gt_objects = []
                     # grab occluders too
                     gt_occluders = []
@@ -163,17 +165,17 @@ class IntPhys(torch.utils.data.Dataset):
                                 # Sample a 48x48 patch from the image that doesn't overlap gt patches
                                 done = False
                                 while not done:
-                                    i = np.random.randint(24, w-24)
-                                    j = np.random.randint(24, h-24)
+                                    i = np.random.randint(self.crop_sz, w-self.crop_sz)
+                                    j = np.random.randint(self.crop_sz, h-self.crop_sz)
                                     if len(gt_objects[vidx]) == 0:
                                         done = True
                                     else:
                                         for obj in gt_objects[vidx]:
-                                            gt_i = obj[0]; gt_j = obj[1];
-                                            if abs(gt_i - i) > 24 and abs(gt_j - j) > 24:
+                                            gt_i = obj[0]; gt_j = obj[1]
+                                            if abs(gt_i - i) > self.crop_sz and abs(gt_j - j) > self.crop_sz:
                                                 done = True
-                                h_min = max(0, j-24); h_max = min(h-1, j+24)
-                                w_min = max(0, i-24); w_max = min(w-1, i+24)
+                                h_min = max(0, j-self.crop_sz); h_max = min(h-1, j+self.crop_sz)
+                                w_min = max(0, i-self.crop_sz); w_max = min(w-1, i+self.crop_sz)
                                 crop = grid[:, h_min:h_max, w_min:w_max]
                                 crop_c, crop_h, crop_w = crop.shape
                                 # randomly flip
@@ -207,6 +209,7 @@ class IntPhys(torch.utils.data.Dataset):
                 if self.last_flip and not self.test:
                     for r in range(bev.shape[0]):
                         bev[r] = np.flipud(bev[r]).copy()
+                if self.last_flip or self.test:
                     for r in range(fv.shape[0]):
                         fv[r] = np.flipud(fv[r]).copy()
                 if self.test:
@@ -215,21 +218,22 @@ class IntPhys(torch.utils.data.Dataset):
                     return {'BEV': bev, 'FV': fv}
             else:
                 with open('%s/annotations/%03d.txt' %(video_path, idx), 'r') as f:
-                    max_depth = float(f.readline())
                     # BEV 
                     # 87
-                    grid_x = int(np.ceil((self.depth2bev.bev_x_dim / self.depth2bev.bev_x_res) / pixor_downsample))
+                    grid_x = int(np.ceil(self.depth2bev.bev_x_dim / pixor_downsample))
                     # 63
-                    grid_y = int(np.ceil((self.depth2bev.bev_y_dim / self.depth2bev.bev_y_res) / pixor_downsample))
+                    grid_y = int(np.ceil(self.depth2bev.bev_y_dim / pixor_downsample))
                     bev_grid_dims = [grid_x, grid_y]
                     # FV
                     # 87
-                    grid_x = int(np.ceil((self.depth2bev.bev_x_dim / self.depth2bev.bev_x_res) / pixor_downsample))
+                    grid_x = int(np.ceil(self.depth2bev.fv_x_dim / pixor_downsample))
                     # 20
-                    grid_y = int(np.ceil((self.depth2bev.bev_z_dim / self.depth2bev.bev_z_res) / pixor_downsample))
+                    grid_y = int(np.ceil(self.depth2bev.fv_y_dim / pixor_downsample))
                     fv_grid_dims = [grid_x, grid_y]
                     data = {}
                     for view, grid_dims in zip(['BEV', 'FV'], [bev_grid_dims, fv_grid_dims]):
+                        f.seek(0)
+                        max_depth = float(f.readline())
                         data[view] = {}
                         grid_x = grid_dims[0]; grid_y = grid_dims[1]
                         # Use H x W for easy integration with PyTorch
@@ -257,27 +261,23 @@ class IntPhys(torch.utils.data.Dataset):
                                     if view == 'BEV':
                                         x, y = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, view=view)
                                         dx = rescaled_pos[0] - x; dy = rescaled_pos[1] - y
-                                        rm_idx = 0
-                                        for r,d in zip([0, 1], [dx, dy]):
+                                        for r,d in enumerate([dx, dy]):
                                             # normalize to N(0,1)
-                                            d = (d - self.depth2bev.regression_stats[r][0]) / self.depth2bev.regression_stats[r][1]
-                                            regression_map[rm_idx, p[1], p[0]] = d
-                                            rm_idx += 1
+                                            d = (d - self.depth2bev.regression_stats[view][r][0]) / self.depth2bev.regression_stats[view][r][1]
+                                            regression_map[r, p[1], p[0]] = d
                                     elif view == 'FV':
-                                        x, z = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, view=view)
-                                        dx = rescaled_pos[0] - x; dz = rescaled_pos[2] - z
-                                        rm_idx = 0
-                                        for r,d in zip([0, 2], [dx, dz]):
+                                        y, z = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, view=view)
+                                        dy = rescaled_pos[1] - y; dz = rescaled_pos[2] - z
+                                        for r,d in enumerate([dy, dz]):
                                             # normalize to N(0,1)
-                                            d = (d - self.depth2bev.regression_stats[r][0]) / self.depth2bev.regression_stats[r][1]
-                                            regression_map[rm_idx, p[1], p[0]] = d
-                                            rm_idx += 1
+                                            d = (d - self.depth2bev.regression_stats[view][r][0]) / self.depth2bev.regression_stats[view][r][1]
+                                            regression_map[r, p[1], p[0]] = d
                         if self.last_flip:      
                             binary_map = np.flipud(binary_map).copy()
                             for r in range(2):
                                 regression_map[r] = np.flipud(regression_map[r]).copy()
                         data[view]['binary_target'] = binary_map
-                        data[view]['regression_map'] = regression_map
+                        data[view]['regression_target'] = regression_map
                     return data
 
         def load(x, nc, start, seq, interp, c):

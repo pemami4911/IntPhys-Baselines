@@ -43,27 +43,30 @@ class Depth2BEV:
     self.cy = self.frame_height / 2
     self.grid_x_res = grid_x_res
     self.grid_y_res = grid_y_res
-    self.grid_z_res = grid_z_res
     self.pc_x_dim = pc_dims[0]
     self.pc_y_dim = pc_dims[1]
     self.pc_z_dim = pc_dims[2]
     self.bev_x_dim = opt.view_dims['BEV'][0]
     self.bev_y_dim = opt.view_dims['BEV'][1]
     self.grid_height_channels = opt.view_dims['BEV'][2]
+    self.bev_z_res = pc_dims[2] / self.grid_height_channels
     self.fv_x_dim = opt.view_dims['FV'][0]
     self.fv_y_dim = opt.view_dims['FV'][1]
     self.grid_depth_channels = opt.view_dims['FV'][2]
+    self.fv_z_res = pc_dims[0] / self.grid_depth_channels
     self.fixed_depth = fixed_depth
     self.ball_radius = opt.ball_radius
-    self.regression_stats = []
+    self.regression_stats = {}
     if opt.normalize_regression:
-        with open(opt.regression_statistics_file, 'r') as rs:
-            for i in range(3):
-                l = rs.readline().split(" ")
-                md = int(l[0])
-                mean = float(l[1])
-                std = np.sqrt(float(l[2]))
-                self.regression_stats.append([mean, std])
+        for view in ['BEV', 'FV']:
+            self.regression_stats[view] = []
+            with open('regression_stats_{}.txt'.format(view), 'r') as rs:
+                for i in range(3):
+                    l = rs.readline().split(" ")
+                    md = int(l[0])
+                    mean = float(l[1])
+                    std = np.sqrt(float(l[2]))
+                    self.regression_stats[view].append([mean, std])
 
 
   def depth_2_point_cloud(self, depth_data, max_depth=None):
@@ -216,7 +219,7 @@ class Depth2BEV:
   def point_2_grid_cell(self, point, scale=1, view='BEV'):
     """
     Given an arbitrary point from the point cloud, return
-    the i, j coords of its grid cell in the BEV map.
+    the i, j coords of its grid cell in the view map.
     """
     # in BEV, the x coord maps to the y-dim of point cloud
     if view == 'BEV':
@@ -240,18 +243,18 @@ class Depth2BEV:
         return x, y
     elif view == 'FV':
         y = i * self.grid_x_res * scale
-        z = j * self.grid_z_res * scale
+        z = j * self.grid_y_res * scale
         if k >= 0:
-            z = k * (self.pc_x_dim / self.grid_depth_channels) * scale
+            x = k * self.fv_z_res * scale
             return x, y, z
         return y, z
   
   def z_2_grid(self, z, scale=1, view='BEV'):
     """ Map z of point to one of the discretized channels """ 
     if view == 'BEV':
-        z_res = (scale * self.pc_z_dim) / self.grid_height_channels
+        z_res = self.bev_z_res * scale
     elif view == 'FV':
-        z_res = (scale * self.pc_x_dim ) / self.grid_depth_channels
+        z_res = self.fv_z_res * scale
     return int(np.floor(z / z_res))
 
   def point_cloud_2_view(self, point_cloud, view='BEV'):
@@ -277,12 +280,14 @@ class Depth2BEV:
     z_start = 0
     if view == 'BEV':
         p_idx = 2
+        z_res = self.bev_z_res
     elif view == 'FV':
         p_idx = 0
+        z_res = self.fv_z_res
     # TODO: Parallelize this for loop
     iters = self.grid_height_channels if view == 'BEV' else self.grid_depth_channels
     for h in range(iters):
-      z_end = z_start + self.grid_z_res
+      z_end = z_start + z_res
       pts = point_cloud[(point_cloud[:,:,p_idx] >= z_start) & (point_cloud[:,:,p_idx] < z_end)]
       # compute grid cell for each point
       # TODO: Parallelize or vectorize?
@@ -294,7 +299,7 @@ class Depth2BEV:
         # throw out points outside of the grid
         if i < grid.shape[2] and j < grid.shape[1]:
           grid[h, j, i] |= 1
-      z_start += self.grid_z_res
+      z_start += z_res
     return grid, offsets
 
 if __name__ == '__main__':

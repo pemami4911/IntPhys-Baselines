@@ -19,7 +19,7 @@ trainLoader = torch.utils.data.DataLoader(
     d1,
     opt.bsz,
     num_workers=opt.nThreads,
-    sampler=torch.utils.data.sampler.SubsetRandomSampler(d1.indices)    
+    sampler=torch.utils.data.sampler.SubsetRandomSampler(d1.indices)
 )
 d2 = datasets.IntPhys(opt, 'paths_val')
 valLoader = torch.utils.data.DataLoader(
@@ -83,16 +83,19 @@ def process_batch(batch, loss, i, k, set_, t0):
             img = np.concatenate(to_plot, 2)
         elif opt.input == 'bev-depth':
             to_plot = []
-            bev, targets = utils.bev_batch_viz(batch)
-            to_plot.append(bev)
-            to_plot.append(targets)
-            to_plot.append(model.output())
+            bev, fv, bev_targets, fv_targets = utils.bev_batch_viz(batch)
+            to_plot.append((bev, 'BEV'))
+            to_plot.append((fv, 'FV'))
+            to_plot.append((bev_targets, 'BEV targets'))
+            to_plot.append((fv_targets, 'FV targets'))
+            to_plot.append((model.output(), 'BEV and FV predictions'))
             img = to_plot
         elif opt.input == 'bev-crop':
             img = []
-            bev_crop, fv_crop = utils.bev_crop_viz(batch)
+            bev_crop, fv_crop, fv_full, label = utils.bev_crop_viz(batch)
             #img.append(bev_crop)
-            img.append(fv_crop)
+            img.append((fv_full, label))
+            img.append((fv_crop, label))
         viz(img, loss, i, k, nbatch, set_)
     return loss
 

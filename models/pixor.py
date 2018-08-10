@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -19,22 +20,38 @@ class MVPIXOR(Model):
             self.bev_pixor = PIXORBinary(opt, 'BEV')
             self.fv_pixor = PIXORBinary(opt, 'FV')
 
-    def load_state_dict(self, x, set_):
-        # TODO: separate x into two dicts
-        bev_state_dict, fv_state_dict = {}, {}
-        for k,v in x.items():
-            if 'bev_pixor' in k:
-                bev_state_dict[k] = v
-            elif 'fv_pixor' in k:
-                fv_state_dict[k] = v
-            self.bev_pixor.load_state_dict(bev_state_dict, set_)
-            self.fv_pixor.load_state_dict(fv_state_dict, set_)
+    def load(self, x, set_):
+        for e in x:
+            if 'bev' in e[0]:
+                print('loading bev_pixor at %s' %(e[1]))
+                self.bev_pixor.load_state_dict(torch.load(e[1]), set_)
+            elif 'fv' in e[0]:
+                print('loading fv_pixor at %s' %(e[1]))
+                self.fv_pixor.load_state_dict(torch.load(e[1]), set_)
     
-    def state_dict(self):
-        return {**self.bev_pixor, **self.fv_pixor}
+    def save(self, path, epoch):
+        f = open(os.path.join(path, 'bev_pixor.txt'), 'w')
+        f.write(str(self.bev_pixor))
+        f.close()
+        torch.save(
+            self.bev_pixor.state_dict(),
+            os.path.join(path, 'bev_pixor_%s.pth' %epoch)
+        )
+        f = open(os.path.join(path, 'fv_pixor.txt'), 'w')
+        f.write(str(self.fv_pixor))
+        f.close()
+        torch.save(
+            self.fv_pixor.state_dict(),
+            os.path.join(path, 'fv_pixor_%s.pth' %epoch)
+        )
 
     def parameters(self):
-        return {**self.bev_pixor.parameters(), **self.fv_pixor.parameters()}
+        params = []
+        for m in self.bev_pixor.parameters():
+            params.append(m)
+        for m in self.fv_pixor.parameters():
+            params.append(m)
+        return params 
 
     def train(self):
         self.bev_pixor.train()
@@ -62,6 +79,70 @@ class MVPIXOR(Model):
         o2 = self.fv_pixor.output()
         return np.concatenate([o1, o2], axis=0)
 
+    def predict(self, x, depth2bev):
+        with torch.no_grad():
+            bev_detections, bev_conf_scores = self.bev_pixor.predict(x, 'BEV', depth2bev)
+            
+            fv = x[0]['FV'].squeeze()
+            self.fv_pixor.input.data.copy_(fv)
+            reg_out, binary_out = self.fv_pixor.pixor(self.fv_pixor.input)
+            reg_out = reg_out.squeeze().cpu().numpy()
+            binary_out = binary_out.squeeze()
+            fv_conf_scores = binary_out.sigmoid().cpu().numpy()
+            #fv_pixels = (fv_conf_scores > self.fv_pixor.conf_thresh).nonzero()
+            # for each bev detection, try to grab z
+            dets = np.zeros((bev_detections.shape[0], 3))
+            bev_det_cells = []
+            fv_det_cells = []
+            for k, bd in enumerate(bev_detections):
+                # get the x coord of the detection
+                x_cord = int(np.floor(bd[0] / (depth2bev.grid_x_res * 4)))
+                # get the y coord 
+                y_cord = int(np.floor(bd[1] / (depth2bev.grid_y_res * 4)))
+                print("BEV: ", x_cord, y_cord)
+                bev_det_cells.append((x_cord, y_cord))
+                best_z_conf = -1
+                best_z = -1
+                for i in range(max(0, y_cord), min(y_cord+1, fv_conf_scores.shape[1])):
+                    # compute the max across the z values in 3 cell neighborhood (this is in 4x downsample)
+                    z_idx = np.argmax(fv_conf_scores[:,i])
+                    tmp = fv_conf_scores[z_idx, i]
+                    if tmp > best_z_conf:
+                        best_z_conf = tmp
+                        best_z = int(z_idx)
+                # need to invert z
+                inv_best_z = fv_conf_scores.shape[0] - best_z
+                print("FV: ", y_cord, inv_best_z)
+                fv_det_cells.append((best_z, y_cord))
+                # convert best_z to point
+                dz = reg_out[1, best_z, y_cord]
+                z = best_z * depth2bev.grid_y_res * 4
+                dz = dz * depth2bev.regression_stats['FV'][1][1] + depth2bev.regression_stats['FV'][1][0]
+                final_pred_z = z + dz
+                dets[k,0] = bd[0]
+                dets[k,1] = bd[1]
+                # need to invert z 
+                dets[k,2] = depth2bev.pc_z_dim - final_pred_z
+        """ 
+        labeled_bev_conf = 255 * np.ones((bev_conf_scores.shape[0], bev_conf_scores.shape[1], 3))
+        for i in range(bev_conf_scores.shape[0]):
+            for j in range(bev_conf_scores.shape[1]):
+                labeled_bev_conf[i, j, :] = np.array([0, bev_conf_scores[i,j] * 255, 0])
+        for bd in bev_det_cells:
+            labeled_bev_conf[bd[0], bd[1], :] = np.array([255, 0, 0])
+        labeled_fv_conf = 255 * np.ones((fv_conf_scores.shape[0], fv_conf_scores.shape[1], 3))
+        for i in range(fv_conf_scores.shape[0]):
+            for j in range(fv_conf_scores.shape[1]):
+                labeled_fv_conf[i, j, :] = np.array([0, fv_conf_scores[i,j] * 255, 0])
+        for bd in fv_det_cells:
+            labeled_fv_conf[int(bd[0]), int(bd[1]), :] = np.array([255, 0, 0])
+        #for bd in bev_det_cells:
+        #    labeled_fv_conf[:, bd[1], :] = np.array([0, 0, 255])
+        return dets, bev_conf_scores, fv_conf_scores, labeled_bev_conf, labeled_fv_conf
+        """
+        return dets
+
+# TODO runnable standalone or as Multi-view
 class PIXOR(Model):
     """
     Separate model (the IntPhys model API) and PIXORNet to use nn.DataParallel :( 
@@ -73,8 +154,8 @@ class PIXOR(Model):
         self.x_dim = opt.view_dims[view][0] # width
         self.y_dim = opt.view_dims[view][1] # height
         self.z_dim = opt.view_dims[view][2] # channels
-        self.target_x_dim = opt.target_view_dims[view][0]
-        self.target_y_dim = opt.target_view_dims[view][1]
+        self.target_x_dim = int(np.ceil(self.x_dim / 4)) 
+        self.target_y_dim = int(np.ceil(self.y_dim / 4))
         self.conf_thresh = opt.conf_thresh
         self.ball_radius = opt.ball_radius
         self.IOU_thresh = opt.IOU_thresh
@@ -92,7 +173,7 @@ class PIXOR(Model):
         self.input.pin_memory()
         self.regression_target.pin_memory()
         self.binary_class_target.pin_memory()
-        self.categorical_target.pin_memory()
+        #self.categorical_target.pin_memory()
         # optimization
         self.smoothL1 = nn.SmoothL1Loss()
         #self.nll = nn.NLLLoss()
@@ -233,7 +314,7 @@ class PIXOR(Model):
             conf_scores = binary_out.sigmoid()
             # assume this is [N,2], where N is the # of pixels
             pixels = (conf_scores > self.conf_thresh).nonzero()
-            dets = np.zeros((pixels.shape[0], 4))
+            dets = np.zeros((pixels.shape[0], 3))
             for i, p in enumerate(pixels):
                 dxs = reg_out[0][p[0], p[1]]
                 dys = reg_out[1][p[0], p[1]]
@@ -252,14 +333,13 @@ class PIXOR(Model):
                 #ds = [dxs, dys, dzs]
                 ds =  [dxs, dys]
                 for j in range(len(ds)):
-                    ds[j] = depth2bev.regression_stats[j][1] * ds[j] + depth2bev.regression_stats[j][0]
+                    ds[j] = depth2bev.regression_stats[view][j][1] * ds[j] + depth2bev.regression_stats[view][j][0]
                 # decode pixels
                 #_, k = torch.max(F.softmax(cat_out[:,p[0], p[1]]), dim=0)
                 # pixels is [height x width], so [j, i]
                 x, y = depth2bev.grid_cell_2_point(p[1], p[0], scale=4, view=view)
                 dets[i,0] = (x.double().cpu() + ds[0]).numpy()
                 dets[i,1] = (y.double().cpu() + ds[1]).numpy()
-                #dets[i,2] = (z.double().cpu() + ds[2]).numpy()
                 dets[i,2] = conf_scores[p[0], p[1]].cpu().numpy()
             return self.NMS(dets), conf_scores
     
@@ -296,20 +376,22 @@ class PIXOR(Model):
         # sort in decreasing order of confidence
         x = detections[:,0]
         y = detections[:,1]
-        p = detections[:,3]
+        p = detections[:,2]
         idxs = np.argsort(p)
         while len(idxs) > 0:
             last = len(idxs) - 1
             i = idxs[last]
             results.append(i)
-            scores = []
+            delete = []
             for l in range(last-1, -1, -1):
                 j = idxs[l]
                 #score = IOU(x[i], y[i], self.ball_radius, x[j], y[j], self.ball_radius)
                 score = radius_overlap(x[i], y[i], x[j], y[j], self.ball_radius)
-                scores.append(score)
-            idxs = np.delete(idxs, np.concatenate(([last],
-                np.where(np.array(scores) > self.IOU_thresh)[0])))
+                if score > self.IOU_thresh:
+                    delete.append(l)
+            #idxs = np.delete(idxs, np.concatenate(([last],
+            #    np.where(np.array(scores) > self.IOU_thresh)[0])))
+            idxs = np.delete(idxs, np.concatenate(([last], np.array(delete))))
         return detections[results]
 
     def focal_loss(self, x, y):
@@ -348,7 +430,7 @@ class PIXORBinary(Model):
         self.pixor = PIXORNet(opt, self.view)
         # stuff for forward pass
         # N C H W format for Pytorch
-        self.input = Variable(torch.FloatTensor(self.bsz, self.z_dim, 48, 48))
+        self.input = Variable(torch.FloatTensor(self.bsz, self.z_dim, opt.crop_sz, opt.crop_sz))
         self.binary_class_target = Variable(torch.FloatTensor(self.bsz, 1))
         self.input.pin_memory()
         self.binary_class_target.pin_memory()
@@ -474,7 +556,7 @@ class PIXORNet(nn.Module):
                 nn.Conv2d(96,1,3,1,1),
                 nn.ReLU(inplace=True),
                 nn.BatchNorm2d(1))
-            self.classification_out = nn.Linear(144, 1)
+            self.classification_out = nn.Linear(int((opt.crop_sz/4) ** 2), 1)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):

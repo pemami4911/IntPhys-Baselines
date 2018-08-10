@@ -39,7 +39,7 @@ def make(parser):
     parser.add_argument('--image_save', action='store_true', help='Save image generations in the checkpoint folder')
     parser.add_argument('--image_save_interval', type=int, default=100)
     parser.add_argument('--visdom', action='store_true', help='Vizualisation with Visdom (https://github.com/facebookresearch/visdom)')
-    parser.add_argument('--visdom_interval', type=int, default=10)
+    parser.add_argument('--visdom_interval', type=int, default=5)
     parser.add_argument('--gpu', action='store_true', help='Use NVIDIA GPU')
     parser.add_argument('--optimizer', default='adam')
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
@@ -91,12 +91,12 @@ def make(parser):
     parser.add_argument('--IOU_thresh', type=float, default=0.5)
     parser.add_argument('--ball_radius', type=float, default=60)
     parser.add_argument('--normalize_regression', action='store_true', help='use mean and variance of regression data')
-    parser.add_argument('--regression_statistics_file', type=str, default="regression_stats.txt")
+    parser.add_argument('--crop_sz', type=int, default=48)
     parser.add_argument('--remove_no_objects', action='store_true', help='remove images without GT objects')
     parser.add_argument('--disable_checkpoint', action='store_true')
 
     opt = parser.parse_args()
-
+    
     if opt.name is None:
         opt.name = opt.model
 
