@@ -99,6 +99,11 @@ class MVPIXOR(Model):
                 x_cord = int(np.floor(bd[0] / (depth2bev.grid_x_res * 4)))
                 # get the y coord 
                 y_cord = int(np.floor(bd[1] / (depth2bev.grid_y_res * 4)))
+                # clamp
+                # TODO: 62 is x_dim/4 - 1 (63 - 1)
+                x_cord = max(min(62, x_cord), 0)
+                # TODO: 87 is y_dim/4 - 1
+                y_cord = max(min(86, y_cord), 0)
                 print("BEV: ", x_cord, y_cord)
                 bev_det_cells.append((x_cord, y_cord))
                 best_z_conf = -1

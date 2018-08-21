@@ -227,7 +227,7 @@ class IntPhys(torch.utils.data.Dataset):
                     # FV
                     # 87
                     grid_x = int(np.ceil(self.depth2bev.fv_x_dim / pixor_downsample))
-                    # 20
+                    # 63
                     grid_y = int(np.ceil(self.depth2bev.fv_y_dim / pixor_downsample))
                     fv_grid_dims = [grid_x, grid_y]
                     data = {}
@@ -247,8 +247,7 @@ class IntPhys(torch.utils.data.Dataset):
                             for r in range(3): rescaled_pos[r] += self.last_offsets[r]
                             # pixel location of the object
                             i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=pixor_downsample, view=view)
-                            #k = self.depth2bev.z_2_grid(rescaled_pos[2], scale=pixor_downsample)
-                            # set pixels in ~50 pixel radius to 1 (50 / 10 / 4 ~ 2)
+                            # set pixels in ~120 pixel radius to 1 (120 / 10 / 4 ~ 3)
                             if 0 <= i < grid_x and 0 <= j < grid_y: # check k
                                 #if k < 0:
                                 #    print('%s/annotations/%03d.txt' %(video_path, idx), pos[2], rescaled_pos[2], k)
@@ -256,8 +255,7 @@ class IntPhys(torch.utils.data.Dataset):
                                 px = utils.get_nearby_pixels(c, self.manhattan_dist, (grid_y, grid_x))
                                 for p in px: # positives
                                     binary_map[p[1], p[0]] = 1
-                                    #height_map[p[1], p[0]] = k
-                                    # compute dx, dy, and dz for each grid cell in the set of positives 
+                                    # compute dx, dy for each grid cell in the set of positives 
                                     if view == 'BEV':
                                         x, y = self.depth2bev.grid_cell_2_point(p[0], p[1], scale=pixor_downsample, view=view)
                                         dx = rescaled_pos[0] - x; dy = rescaled_pos[1] - y
