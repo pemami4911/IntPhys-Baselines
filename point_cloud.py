@@ -29,7 +29,7 @@ class Depth2BEV:
   In PyTorch, this is 35 x 250 x 348 (NCHW format).
 
   """
-  def __init__(self, opt, image_dims=[288, 288], pc_dims=[2500, 3480, 2500], 
+  def __init__(self, opt, image_dims=[288, 288], pc_dims=[2500, 3480, 800], 
       fovx=90, fovy=90, grid_x_res=10, grid_y_res=10, grid_z_res=10, fixed_depth=2500):
     self.frame_height = image_dims[0]
     self.frame_width = image_dims[1]

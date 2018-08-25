@@ -231,6 +231,7 @@ class IntPhys(torch.utils.data.Dataset):
                     grid_y = int(np.ceil(self.depth2bev.fv_y_dim / pixor_downsample))
                     fv_grid_dims = [grid_x, grid_y]
                     data = {}
+                    gt_objects = []
                     for view, grid_dims in zip(['BEV', 'FV'], [bev_grid_dims, fv_grid_dims]):
                         f.seek(0)
                         max_depth = float(f.readline())
@@ -245,12 +246,12 @@ class IntPhys(torch.utils.data.Dataset):
                             rescaled_pos = self.depth2bev.backproject_and_rescale(
                                     pos, self.depth2bev.fixed_depth / max_depth)
                             for r in range(3): rescaled_pos[r] += self.last_offsets[r]
+                            if view == 'BEV':
+                                gt_objects.append(rescaled_pos)
                             # pixel location of the object
                             i, j = self.depth2bev.point_2_grid_cell(rescaled_pos, scale=pixor_downsample, view=view)
                             # set pixels in ~120 pixel radius to 1 (120 / 10 / 4 ~ 3)
                             if 0 <= i < grid_x and 0 <= j < grid_y: # check k
-                                #if k < 0:
-                                #    print('%s/annotations/%03d.txt' %(video_path, idx), pos[2], rescaled_pos[2], k)
                                 c = (i, j) 
                                 px = utils.get_nearby_pixels(c, self.manhattan_dist, (grid_y, grid_x))
                                 for p in px: # positives
@@ -276,6 +277,7 @@ class IntPhys(torch.utils.data.Dataset):
                                 regression_map[r] = np.flipud(regression_map[r]).copy()
                         data[view]['binary_target'] = binary_map
                         data[view]['regression_target'] = regression_map
+                    data['objects'] = gt_objects
                     return data
 
         def load(x, nc, start, seq, interp, c):

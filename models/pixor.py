@@ -104,7 +104,7 @@ class MVPIXOR(Model):
                 x_cord = max(min(62, x_cord), 0)
                 # TODO: 87 is y_dim/4 - 1
                 y_cord = max(min(86, y_cord), 0)
-                print("BEV: ", x_cord, y_cord)
+                #print("BEV: ", x_cord, y_cord)
                 bev_det_cells.append((x_cord, y_cord))
                 best_z_conf = -1
                 best_z = -1
@@ -117,7 +117,7 @@ class MVPIXOR(Model):
                         best_z = int(z_idx)
                 # need to invert z
                 inv_best_z = fv_conf_scores.shape[0] - best_z
-                print("FV: ", y_cord, inv_best_z)
+                #print("FV: ", y_cord, inv_best_z)
                 fv_det_cells.append((best_z, y_cord))
                 # convert best_z to point
                 dz = reg_out[1, best_z, y_cord]
@@ -308,7 +308,7 @@ class PIXOR(Model):
         """
         with torch.no_grad():
             frame = x[0][view].squeeze()
-            regression_target = x[1][view]['regression_target'].squeeze()
+            #regression_target = x[1][view]['regression_target'].squeeze()
             self.input.data.copy_(frame)
             #reg_out, binary_out, cat_out = self.pixor(self.input)
             reg_out, binary_out = self.pixor(self.input)
@@ -325,13 +325,13 @@ class PIXOR(Model):
                 dys = reg_out[1][p[0], p[1]]
                 #dzs = reg_out[2][p[0], p[1]]
                 # gt
-                gt_dxs = regression_target[0][p[0], p[1]]
-                gt_dys = regression_target[1][p[0], p[1]]
+                #gt_dxs = regression_target[0][p[0], p[1]]
+                #gt_dys = regression_target[1][p[0], p[1]]
                 #gt_dzs = regression_target[2][p[0], p[1]]
                 #if gt_dxs != 0.0 and gt_dys != 0.0 and gt_dzs != 0.0:
-                if gt_dxs != 0.0 and gt_dys != 0.0:
-                    print("dx = {}, gt dx = {}".format(dxs, gt_dxs))
-                    print("dy = {}, gt dy = {}".format(dys, gt_dys))
+                #if gt_dxs != 0.0 and gt_dys != 0.0:
+                    #print("dx = {}, gt dx = {}".format(dxs, gt_dxs))
+                    #print("dy = {}, gt dy = {}".format(dys, gt_dys))
                     #print("dz = {}, gt dz = {}".format(dzs, gt_dzs))
                 
                 # do \sigma * dx + \mu to add back regression stats

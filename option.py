@@ -86,7 +86,7 @@ def make(parser):
     parser.add_argument('--pixor_head', type=str, default="full")
     parser.add_argument('--view', type=str, default="BEV", help="BEV|FV|Multi")
     parser.add_argument('--bev_dims', nargs='+', type=int, default=[348, 250, 35])
-    parser.add_argument('--fv_dims', nargs='+', type=int, default=[348, 250, 35])
+    parser.add_argument('--fv_dims', nargs='+', type=int, default=[348, 80, 35])
     parser.add_argument('--conf_thresh', type=float, default=0.6)
     parser.add_argument('--IOU_thresh', type=float, default=0.5)
     parser.add_argument('--ball_radius', type=float, default=60)
@@ -94,6 +94,7 @@ def make(parser):
     parser.add_argument('--crop_sz', type=int, default=48)
     parser.add_argument('--remove_no_objects', action='store_true', help='remove images without GT objects')
     parser.add_argument('--disable_checkpoint', action='store_true')
+    parser.add_argument('--gpu_id', type=int, default=0)
 
     opt = parser.parse_args()
     
