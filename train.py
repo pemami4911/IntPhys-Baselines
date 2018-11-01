@@ -4,6 +4,7 @@ import random
 import time
 import numpy as np
 from pydoc import locate
+import torch.nn as nn
 
 import option
 import models
@@ -21,6 +22,7 @@ trainLoader = torch.utils.data.DataLoader(
     num_workers=opt.nThreads,
     sampler=torch.utils.data.sampler.SubsetRandomSampler(d1.indices)
 )
+opt.count = 400
 d2 = datasets.IntPhys(opt, 'paths_val')
 valLoader = torch.utils.data.DataLoader(
     d2,
@@ -96,6 +98,11 @@ def process_batch(batch, loss, i, k, set_, t0):
             #img.append(bev_crop)
             img.append((fv_full, label))
             img.append((fv_crop, label))
+        elif opt.input == 'bev-prior':
+            img = []
+            bev = utils.bev_prior_viz(batch)
+            img.append((bev, 'BEV'))
+            img.append((model.output(), 'prior and posterior'))
         viz(img, loss, i, k, nbatch, set_)
     return loss
 

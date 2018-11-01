@@ -6,7 +6,7 @@ import numpy as np
 from pydoc import locate
 import scipy.misc
 import csv
-
+import os
 import option
 import models
 import datasets
@@ -17,15 +17,18 @@ from tqdm import tqdm
 
 opt = option.make(argparse.ArgumentParser())
 
-d = datasets.IntPhys(opt, 'paths_test')
+#d = datasets.IntPhys(opt, 'paths_test')
+d = datasets.IntPhys(opt, 'paths_val')
+indices = [4246]
 #indices = list(range(1, 5000))
-indices = list(range(1200,1300))
+#indices = list(range(1200,1300))
 valLoader = torch.utils.data.DataLoader(
     d,
     1,
     num_workers=opt.nThreads,
     sampler=datasets.SubsetSampler(indices)
 )
+
 opt.nbatch_val = len(valLoader)
 print(opt)
 np.random.seed(opt.manualSeed)
@@ -53,14 +56,22 @@ overlap_ratios = [1.0]
 conf_threshs = [0.9]
 ball_radii = [opt.ball_radius]
 
-outfile = open('eval_results.csv', 'w')
-fieldnames = ['conf thresh', 'overlap ratio', 'ball radius', 'precision', 'recall']
-csv_writer = csv.DictWriter(outfile, fieldnames=fieldnames)
-csv_writer.writeheader()
+#outfile = open(os.path.join(opt.results, 'detector_eval_results.csv'), 'w+')
+#fieldnames = ['conf thresh', 'overlap ratio', 'ball radius', 'precision', 'recall']
+#csv_writer = csv.DictWriter(outfile, fieldnames=fieldnames)
+#csv_writer.writeheader()
+
+if opt.save_detections:
+    #detections_file = open(os.path.join('/data/pemami/intphys/val_detections.csv'), 'w+')
+    detections_file = open(os.path.join(opt.results, 'val_detections.csv'), 'w+')
+    #fieldnames = ['height','depth','width','p(i-1;j-1)', 'p(i;j-1)', 'p(i+1;j-1)', 'p(i-1;j)', 'p(i;j)', 'p(i+1;j)', 'p(i-1;j+1)', 'p(i;j+1)', 'p(i+1;j+1)']
+    fieldnames = ['idx', 'height', 'depth', 'width', 'p']
+    det_csv_writer = csv.DictWriter(detections_file, fieldnames=fieldnames)
+    det_csv_writer.writeheader()
 
 viz = utils.Viz(opt)
 model.eval()
-i = indices[0]
+i = d.indices[0]
 for radius in ball_radii:
     opt.ball_radius = radius
     model.bev_pixor.ball_radius = radius
@@ -71,14 +82,14 @@ for radius in ball_radii:
             model.bev_pixor.conf_thresh = conf_th
             model.fv_pixor.conf_thresh = conf_th
             for data in tqdm(valLoader):
-                pc = data[0]['point_cloud'].squeeze()
+                #pc = data[0]['point_cloud'].squeeze()
                 # numpy array [N,4]
                 #detections, bev_scores, fv_scores, labeled_bev_scores, labeled_fv_scores = model.predict(data, d.depth2bev)
-                detections = model.predict(data, d.depth2bev)
-                #print(detections)
+                detections, dets_px, bev_scores, _ = model.predict(data, d.depth2bev)
+                print(detections)
                 objects = data[1]['objects']
                 found_objs = 0
-                for det in detections:
+                for det, dp in zip(detections, dets_px):
                     j = -1; found = False
                     for obj in objects:
                         obj = obj.numpy()[0]
@@ -92,12 +103,31 @@ for radius in ball_radii:
                             found = True
                             true_positives += 1
                             found_objs += 1
+                            print(det)
+                            print(obj)
+                            x, y, z=dp[0], dp[1], dp[2]
+                            x = int(round(x/4))
+                            y = int(round(y/4))
+                            z = int(round(z/4))
+                            print(bev_scores[x,y])
+                            if opt.save_detections:
+                                x, y, z=dp[0], dp[1], dp[2]
+                                x = int(round(x/4))
+                                y = int(round(y/4))
+                                z = int(round(z/4))
+                                det_csv_writer.writerow({'idx': i, 'height': round(det[2],3), 'depth': round(det[0],3), 'width': round(det[1],3), 'p': bev_scores[x,y]})
                             break
                     if found:
                         del objects[j]
                 # this should be 0 if all objects were accounted for
                 false_negatives += len(objects)
                 false_positives += len(detections) - found_objs
+                
+                # store bev scores for false negatives
+                if opt.save_detections:
+                    for obj in objects:
+                        y,x = d.depth2bev.point_2_grid_cell(obj[0], scale=4)
+                        det_csv_writer.writerow({'idx': i, 'height': round(obj[0,2].item(),3), 'depth': round(obj[0,0].item(),3), 'width': round(obj[0,1].item(),3), 'p': bev_scores[x,y]})
 
                 if opt.image_save or opt.visdom:
                     start = time.time()
@@ -120,7 +150,6 @@ for radius in ball_radii:
                     scipy.misc.imsave('eval_imgs/fv_{}.png'.format(i), tmp)
                     """    
                 i += 1
-                #exit(0)
             
             prec = 0
             tp_fp = true_positives + false_positives

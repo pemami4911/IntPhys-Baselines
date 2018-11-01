@@ -7,7 +7,236 @@ from torch.autograd import Variable
 from torchvision.models.resnet import Bottleneck
 import torch.optim as optim
 from .model import Model
-from .cls import CyclicLR
+
+class VNet(Model):
+    """ Visibility-Net """
+    def __init__(self, opt):
+        self.__name__ = 'vnet'
+        opt.pixor_head = 'full'
+        self.bev_pixor = PIXORNet(opt, 'BEV', input_channels=opt.view_dims['BEV'][2])
+        opt.pixor_head = 'viz'
+        self.vnet = PIXORNet(opt, 'BEV', input_channels=1, header_inplanes=384)
+        self.downsample = 0.25
+        self.optimizer = optim.SGD(self.vnet.parameters(), lr=opt.lr, momentum=opt.momentum)
+        self.optim_scheduler = optim.lr_scheduler.MultiStepLR(self.optimizer,
+                milestones=opt.milestones, gamma=opt.lr_decay)
+        self.x_dim = opt.view_dims['BEV'][0] # width
+        self.y_dim = opt.view_dims['BEV'][1] # height
+        self.z_dim = opt.view_dims['BEV'][2] # channels
+        self.bsz = opt.bsz
+        self.bev_input = torch.FloatTensor(self.bsz, self.z_dim, self.y_dim, self.x_dim) 
+        self.vnet_input = torch.FloatTensor(self.bsz, 1, self.y_dim, self.x_dim)
+        self.bev_input.pin_memory()
+        self.vnet_input.pin_memory()
+        self.use_gpu = opt.gpu
+        self.entropy_coeff = opt.entropy_coeff
+
+        opt.pixor_head = 'full'
+        x = torch.load(opt.pretrained_bev)
+        opt.pixor_head = 'viz'
+        new_state_dict = {}
+        for k,v in x.items():
+            new_state_dict[k.replace('module.', '')] = v            
+        self.bev_pixor.load_state_dict(new_state_dict)
+
+        # disable update for the BEV embedding branch
+        for m in self.bev_pixor.modules():
+            m.requires_grad = False
+        self.bev_input.requires_grad = False
+        self.vnet_input.requires_grad = False
+        
+        if opt.n_gpus > 1:
+            self.bev_pixor = nn.DataParallel(self.bev_pixor, device_ids=list(range(opt.n_gpus)))
+            self.vnet = nn.DataParallel(self.vnet, device_ids=list(range(opt.n_gpus)))
+    
+    def train(self):
+        self.bev_pixor.train()
+        self.vnet.train()
+
+    def eval(self):
+        self.bev_pixor.eval()
+        self.vnet.eval()
+
+    def gpu(self):
+        self.bev_pixor.cuda()
+        self.vnet.cuda()
+        self.bev_input = self.bev_input.cuda(async=True)
+        self.vnet_input = self.vnet_input.cuda(async=True)
+        
+    def load(self, x, set_):
+        self.load_state_dict(torch.load(x))
+    
+    def lr_step(self):
+        self.optim_scheduler.step()
+    
+    def parameters(self):
+        params = []
+        for m in self.bev_pixor.parameters():
+            params.append(m)
+        for m in self.vnet.parameters():
+            params.append(m)
+        return params 
+    
+    # TODO: delete
+    def _make_deconv_layer(self, in_planes, out_planes, output_padding=0):
+        upsample = nn.Sequential(
+                nn.ConvTranspose2d(in_planes, out_planes, 3, 2, 1, 
+                    output_padding=output_padding),
+                nn.ReLU(inplace=True),
+                nn.BatchNorm2d(out_planes))
+        return upsample
+
+    def l2(self, viz_posterior):
+        with torch.no_grad():
+            b, c, h, w = viz_posterior.shape
+            viz_prior = torch.clamp(F.interpolate(self.vnet_input, size=(h,w)), 1e-6, 1).log()
+        return F.mse_loss(viz_posterior, viz_prior)
+
+    # TODO: Delete
+    def hellinger_loss(self, viz_posterior):
+        """
+        Implements Hellinger(viz_posterior, viz_prior)
+        Args:
+            viz_posterior: [N,63,87]
+        """
+        # resize viz_prior to 63, 87
+        b, c, h, w = viz_posterior.shape
+        viz_prior = torch.clamp(F.interpolate(self.vnet_input, size=(h,w)), 0, 1)
+        return torch.sqrt(torch.sum((torch.sqrt(viz_posterior) - \
+                torch.sqrt(viz_prior)) ** 2)) / np.sqrt(2)
+
+    # TODO: Delete
+    def kl_loss(self, viz_posterior):
+        """
+        Implements KL(viz_posterior||viz_prior)
+        Args:
+            viz_posterior: [N,63,87]
+        """
+        # resize viz_prior to 63, 87
+        b, c, h, w = viz_posterior.shape
+        viz_prior = torch.clamp(F.interpolate(self.vnet_input, size=(h,w)), 0, 1)
+        return F.kl_div(viz_posterior, viz_prior)
+
+    def posterior_error(self, viz_posterior, detections, occluded):
+        """
+        Loss measuring disagreement between the detector scores and the viz posterior,
+        as well as btwn the occluded object (score = 0) and the viz posterior.
+        Args:
+            viz_posterior: [n,1, 63, 87]
+            detections: [n, 3, 4] (c,h,w indices ordering)
+            occluded: [n, 3, 3] (c,h,w indices ordering)
+        """
+        b, c, h, w = viz_posterior.shape
+        zed = torch.LongTensor([0])
+        h_lim = torch.LongTensor([h-1])
+        w_lim = torch.LongTensor([w-1])
+        if self.use_gpu:
+            detections = detections.cuda()
+            occluded = occluded.cuda()
+            zed = zed.cuda()
+            h_lim = h_lim.cuda()
+            w_lim = w_lim.cuda()
+        def get_local_patches(dets, posterior):
+            """
+            dets is [n,3] or [n,4]
+            posterior is [1,63,87]
+            """
+            dets = dets.long()
+            # assert coord.shape[0] > 0
+            c, h, w = posterior.shape
+            # compute the 9 coords
+            post_patches = []
+            for i in range(-1, 2):
+                for j in range(-1, 2):
+                    j_ = torch.min(torch.max(j + dets[:,1], zed), h_lim) # j
+                    i_ = torch.min(torch.max(i + dets[:,2], zed), w_lim) # i
+                    post_patches.append(posterior[:,j_, i_])
+            post_patches = torch.stack(post_patches).view(-1, 9).contiguous()
+            return post_patches
+        
+        
+        det_preds = []
+        det_targets = []
+        occ_preds = []
+        for i in range(b):
+            # count # of detections
+            n_detections = (detections[i,:,0] != -1.).sum().item()
+            if n_detections > 0:
+                d_post_patches = get_local_patches(detections[i,:n_detections], viz_posterior[i])
+                if d_post_patches is not None:
+                    s = detections[i,:n_detections,3].unsqueeze(1).repeat(1,9).float().log()
+                    if self.use_gpu:
+                        s = s.cuda()
+                    det_preds.append(d_post_patches.view(-1))
+                    det_targets.append(s.view(-1))
+                #pred = viz_posterior[i,:,detections[i,:n_detections,1].long(),
+                #        detections[i,:n_detections,2].long()]
+                #target = detections[i,:n_detections,3].float().expand_as(pred)
+                #loss= loss + F.mse_loss(pred, target)
+            n_occluded = (occluded[i,:,0] != -1.).sum()
+            if n_occluded > 0:
+                o_post_patches = get_local_patches(occluded[i,:n_occluded], viz_posterior[i])
+                if o_post_patches is not None:
+                    #loss = loss + o_post_patches.mean()
+                    occ_preds.append(o_post_patches.view(-1))
+                #pred = viz_posterior[i,:,occluded[i,:n_occluded,1].long(),
+                #        occluded[i,:n_occluded,2].long()]
+                #loss = loss + pred.mean()
+        loss =  F.mse_loss(torch.cat(det_preds), torch.cat(det_targets))
+        if len(occ_preds) > 0:
+            loss = loss + torch.cat(occ_preds).mean()
+        return loss
+
+    def forward(self, bev_x, viz_x):
+        bev_x = self.bev_pixor(bev_x, get_embedding=True)
+        return self.vnet(viz_x, bev_x)
+
+    def step(self, batch, set_):
+        """
+        Args:
+            batch['input'] is batch of input maps of size [N,C,H,W]
+                * batch['input']['BEV'] is BEV grid [N,35,250,348]
+                * batch['input']['visibility'] is v grid [N,1,250,348]
+            batch['labels']['BEV_dets'] is [N,3,4] (FloatTensor)
+            batch['labels']['occluded'] is [N,3,3] (LongTensor)
+        """
+        if set_ == 'train':
+            env = torch.enable_grad
+        else:
+            env = torch.no_grad
+        with env():
+            self.bev_input.data.copy_(batch[0]['BEV'])
+            self.vnet_input.data.copy_(batch[0]['VG'])
+            BEV_dets = batch[1]['detections']
+            occluded = batch[1]['occluded']
+            self.viz_posterior = self.forward(self.bev_input, self.vnet_input)
+            #ent = self.hellinger_loss(self.viz_posterior.sigmoid())
+            #ent = self.kl_loss(F.logsigmoid(self.viz_posterior))
+            #ent = self.l2(F.logsigmoid(self.viz_posterior))
+            posterior_err = self.posterior_error(F.logsigmoid(self.viz_posterior),
+                    BEV_dets, occluded)
+            if set_ == 'train':
+                self.vnet.zero_grad()
+                #(self.entropy_coeff * ent + posterior_err).backward()
+                posterior_err.backward()
+                self.optimizer.step()
+            #result = {'{}_entropy_loss'.format(set_): ent.item()}
+            #result['{}_posterior_err'.format(set_)] = posterior_err.item()
+            result = {'{}_posterior_err'.format(set_): posterior_err.item()}
+            return result
+        
+    def output(self):
+        with torch.no_grad():
+            _, h, w = self.viz_posterior[0].shape
+            prior = self.vnet_input[0].clone()
+            prior = F.interpolate(prior.unsqueeze(0), size=(h,w)).squeeze(0)
+            posterior = self.viz_posterior[0].sigmoid().clone()
+            prior = prior * 255
+            posterior = posterior * 255
+            cat1 = torch.cat([prior, posterior], 0)
+            d1, d2, d3 = cat1.shape
+            cat1 = cat1.view(d1 * d2, d3).cpu().numpy()
+            return cat1
 
 class MVPIXOR(Model):
     """ Multi-view PIXOR """
@@ -79,26 +308,26 @@ class MVPIXOR(Model):
         o2 = self.fv_pixor.output()
         return np.concatenate([o1, o2], axis=0)
 
+    # TODO: remove depth2bev arg
     def predict(self, x, depth2bev):
         with torch.no_grad():
             bev_detections, bev_conf_scores = self.bev_pixor.predict(x, 'BEV', depth2bev)
-            
             fv = x[0]['FV'].squeeze()
             self.fv_pixor.input.data.copy_(fv)
             reg_out, binary_out = self.fv_pixor.pixor(self.fv_pixor.input)
             reg_out = reg_out.squeeze().cpu().numpy()
             binary_out = binary_out.squeeze()
             fv_conf_scores = binary_out.sigmoid().cpu().numpy()
-            #fv_pixels = (fv_conf_scores > self.fv_pixor.conf_thresh).nonzero()
             # for each bev detection, try to grab z
             dets = np.zeros((bev_detections.shape[0], 3))
+            dets_px = []
             bev_det_cells = []
             fv_det_cells = []
             for k, bd in enumerate(bev_detections):
                 # get the x coord of the detection
-                x_cord = int(np.floor(bd[0] / (depth2bev.grid_x_res * 4)))
+                x_cord = int(np.floor(bd[0] / (depth2bev.grid_y_res * 4)))
                 # get the y coord 
-                y_cord = int(np.floor(bd[1] / (depth2bev.grid_y_res * 4)))
+                y_cord = int(np.floor(bd[1] / (depth2bev.grid_x_res * 4)))
                 # clamp
                 # TODO: 62 is x_dim/4 - 1 (63 - 1)
                 x_cord = max(min(62, x_cord), 0)
@@ -106,6 +335,8 @@ class MVPIXOR(Model):
                 y_cord = max(min(86, y_cord), 0)
                 #print("BEV: ", x_cord, y_cord)
                 bev_det_cells.append((x_cord, y_cord))
+                # the score map is in [hxw] format - [63,87]
+                bev_conf = bev_conf_scores[x_cord, y_cord]
                 best_z_conf = -1
                 best_z = -1
                 for i in range(max(0, y_cord), min(y_cord+1, fv_conf_scores.shape[1])):
@@ -115,19 +346,30 @@ class MVPIXOR(Model):
                     if tmp > best_z_conf:
                         best_z_conf = tmp
                         best_z = int(z_idx)
-                # need to invert z
-                inv_best_z = fv_conf_scores.shape[0] - best_z
+                # k coord
                 #print("FV: ", y_cord, inv_best_z)
                 fv_det_cells.append((best_z, y_cord))
                 # convert best_z to point
                 dz = reg_out[1, best_z, y_cord]
                 z = best_z * depth2bev.grid_y_res * 4
                 dz = dz * depth2bev.regression_stats['FV'][1][1] + depth2bev.regression_stats['FV'][1][0]
-                final_pred_z = z + dz
+                #final_pred_z = z + dz
+                final_pred_z = z
                 dets[k,0] = bd[0]
                 dets[k,1] = bd[1]
                 # need to invert z 
-                dets[k,2] = depth2bev.pc_z_dim - final_pred_z
+                #dets[k,2] = depth2bev.pc_z_dim - final_pred_z
+                #dets[k,2] = final_pred_z
+                # Compute the i,j,k coords in [348,250] space
+                x_dim = depth2bev.pc_x_dim / depth2bev.grid_x_res
+                y_dim = depth2bev.pc_y_dim / depth2bev.grid_y_res
+                x_px = int(np.floor(bd[0] / depth2bev.grid_x_res))
+                y_px = int(np.floor(bd[1] / depth2bev.grid_y_res))
+                x_px = max(min(x_dim, x_px), 0)
+                y_px = max(min(y_dim, y_px), 0)
+                # convert the z coord from FV to a BEV height channel index
+                z_px = int(np.floor(dets[k,2] / (depth2bev.pc_z_dim / depth2bev.grid_height_channels)))
+                dets_px.append((x_px, y_px, z_px, bev_conf))
         """ 
         labeled_bev_conf = 255 * np.ones((bev_conf_scores.shape[0], bev_conf_scores.shape[1], 3))
         for i in range(bev_conf_scores.shape[0]):
@@ -145,7 +387,7 @@ class MVPIXOR(Model):
         #    labeled_fv_conf[:, bd[1], :] = np.array([0, 0, 255])
         return dets, bev_conf_scores, fv_conf_scores, labeled_bev_conf, labeled_fv_conf
         """
-        return dets
+        return dets[:3], dets_px, bev_conf_scores.cpu().numpy(), fv_conf_scores
 
 # TODO runnable standalone or as Multi-view
 class PIXOR(Model):
@@ -165,7 +407,7 @@ class PIXOR(Model):
         self.ball_radius = opt.ball_radius
         self.IOU_thresh = opt.IOU_thresh
         self.bsz = 1 if test else opt.bsz
-        self.pixor = PIXORNet(opt, view)
+        self.pixor = PIXORNet(opt, view, input_channels=self.z_dim)
         # stuff for forward pass
         # N C H W format for Pytorch
         self.input = Variable(torch.FloatTensor(self.bsz, self.z_dim, self.y_dim, self.x_dim))
@@ -304,7 +546,7 @@ class PIXOR(Model):
         Outputs object detection predictions
 
         Args: 
-            x: [1,35,250,348] BEV map of scene
+            x[0]['BEV']: [1,35,250,348] BEV map of scene
         """
         with torch.no_grad():
             frame = x[0][view].squeeze()
@@ -321,8 +563,8 @@ class PIXOR(Model):
             pixels = (conf_scores > self.conf_thresh).nonzero()
             dets = np.zeros((pixels.shape[0], 3))
             for i, p in enumerate(pixels):
-                dxs = reg_out[0][p[0], p[1]]
-                dys = reg_out[1][p[0], p[1]]
+                #dxs = reg_out[0][p[0], p[1]]
+                #dys = reg_out[1][p[0], p[1]]
                 #dzs = reg_out[2][p[0], p[1]]
                 # gt
                 #gt_dxs = regression_target[0][p[0], p[1]]
@@ -336,15 +578,17 @@ class PIXOR(Model):
                 
                 # do \sigma * dx + \mu to add back regression stats
                 #ds = [dxs, dys, dzs]
-                ds =  [dxs, dys]
-                for j in range(len(ds)):
-                    ds[j] = depth2bev.regression_stats[view][j][1] * ds[j] + depth2bev.regression_stats[view][j][0]
+                #ds =  [dxs, dys]
+                #for j in range(len(ds)):
+                #    ds[j] = depth2bev.regression_stats[view][j][1] * ds[j] + depth2bev.regression_stats[view][j][0]
                 # decode pixels
                 #_, k = torch.max(F.softmax(cat_out[:,p[0], p[1]]), dim=0)
                 # pixels is [height x width], so [j, i]
                 x, y = depth2bev.grid_cell_2_point(p[1], p[0], scale=4, view=view)
-                dets[i,0] = (x.double().cpu() + ds[0]).numpy()
-                dets[i,1] = (y.double().cpu() + ds[1]).numpy()
+                #dets[i,0] = (x.double().cpu() + ds[0]).numpy()
+                #dets[i,1] = (y.double().cpu() + ds[1]).numpy()
+                dets[i,0] = x.double().cpu().numpy()
+                dets[i,1] = y.double().cpu().numpy()
                 dets[i,2] = conf_scores[p[0], p[1]].cpu().numpy()
             return self.NMS(dets), conf_scores
     
@@ -432,7 +676,7 @@ class PIXORBinary(Model):
         self.y_dim = opt.view_dims[self.view][1] # height
         self.z_dim = opt.view_dims[self.view][2] # channels
         self.bsz = 1 if test else opt.bsz
-        self.pixor = PIXORNet(opt, self.view)
+        self.pixor = PIXORNet(opt, self.view, input_channels=self.z_dim)
         # stuff for forward pass
         # N C H W format for Pytorch
         self.input = Variable(torch.FloatTensor(self.bsz, self.z_dim, opt.crop_sz, opt.crop_sz))
@@ -499,7 +743,7 @@ class PIXORBinary(Model):
         self.binary_class_target = self.binary_class_target.cuda(async=True)
 
     def output(self):
-        return None
+       return None
 
 class PIXORNet(nn.Module):
     """
@@ -507,12 +751,12 @@ class PIXORNet(nn.Module):
     stride 1 or 2, use padding of 1 to preserve dimensions!
     """
 
-    def __init__(self, opt, view):
+    def __init__(self, opt, view, input_channels=35, header_inplanes=192):
         super(PIXORNet, self).__init__()
         # Initial processing by 2 Conv2d layers with
         # 3x3 kernel, stride 1, padding 1
         self.block1 = nn.Sequential(
-            nn.Conv2d(opt.view_dims[view][2], 32, 3, 1, 1),
+            nn.Conv2d(input_channels, 32, 3, 1, 1),
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(32),
             nn.Conv2d(32, 32, 3, 1, 1),
@@ -534,7 +778,7 @@ class PIXORNet(nn.Module):
         # Head network
         self.header = nn.Sequential(
             #nn.Conv2d(96, 96, 3, 1, 1),
-            nn.Conv2d(192, 96, 3, 1, 1),
+            nn.Conv2d(header_inplanes, 96, 3, 1, 1),
             nn.ReLU(inplace=True),
             nn.BatchNorm2d(96),
             nn.Conv2d(96, 96, 3, 1, 1),
@@ -552,9 +796,6 @@ class PIXORNet(nn.Module):
             self.binary_class_out = nn.Conv2d(96, 1, 3, 1, 1)
             # dx, dy, dz offsets
             self.regression_out = nn.Conv2d(96, 2, 3, 1, 1)
-            # multi-class classification for z-dimension occupation
-            # this can be directly interpreted as logits for Softmax2d
-            #self.categorical_out = nn.Conv2d(96, 9, 3, 1, 1)
         elif opt.pixor_head == "binary":
             # single scalar output for binary classification
             self.out1 = nn.Sequential(
@@ -562,6 +803,8 @@ class PIXORNet(nn.Module):
                 nn.ReLU(inplace=True),
                 nn.BatchNorm2d(1))
             self.classification_out = nn.Linear(int((opt.crop_sz/4) ** 2), 1)
+        elif opt.pixor_head == "viz":
+            self.out = nn.Conv2d(96,1,3,1,1)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -573,13 +816,6 @@ class PIXORNet(nn.Module):
             # use class imbalance prior from RetinaNet
             nn.init.constant_(self.binary_class_out.bias, -2.1518512)
     
-    def _make_deconv_layer(self, in_planes, out_planes, output_padding=0):
-        upsample = nn.Sequential(
-                nn.ConvTranspose2d(in_planes, out_planes, 3, 2, 1, 
-                    output_padding=output_padding),
-                nn.ReLU(inplace=True),
-                nn.BatchNorm2d(out_planes))
-        return upsample
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
@@ -597,7 +833,7 @@ class PIXORNet(nn.Module):
 
         return nn.Sequential(*layers)
     
-    def forward(self, x):
+    def forward(self, x, y=None, get_embedding=False):
         """
         x: input tensor of [bsz, C, H, W], where C=35,
           H=250, W=348
@@ -609,6 +845,13 @@ class PIXORNet(nn.Module):
         x = self.block2(x)
         # output [192,63,87]
         x = self.block3(x)
+        if get_embedding:
+            return x
+        if y is not None:
+            # element-wise mean
+            #x = torch.sum(x,y).div(2)
+            # concat - output channel # is 384
+            x = torch.cat([x,y], dim=1)
         # output [256,32,44]
         #x4 = self.block4(x3)
         # output [384,16,22]
@@ -636,6 +879,8 @@ class PIXORNet(nn.Module):
             # ceil(35 / 4) = 9
             #m = self.categorical_out(x)
             return r, c
+        if self.pixor_head == "viz":
+            return self.out(x)
 
 if __name__ == '__main__':
     

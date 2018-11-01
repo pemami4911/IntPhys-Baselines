@@ -126,6 +126,15 @@ def bev_crop_viz(batch):
     fv_full = fv_full.cpu().numpy()
     return bev_tmp, fv_tmp, fv_full, label
 
+def bev_prior_viz(batch):
+    # x1 is [35, 250, 348]
+    x1 = batch[0]['BEV'][0]
+        
+    bev_tmp = x1[0,:,:] * 255
+    for i in range(1,x1.shape[0]):
+        bev_tmp |= (x1[i,:,:] * 255)
+    return  bev_tmp.cpu().numpy()
+
 def Viz(opt):
     """Visualization"""
     if opt.visdom:

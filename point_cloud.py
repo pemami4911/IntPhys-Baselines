@@ -4,6 +4,38 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import cv2
+
+def get_visibility_grid(bev_grid, camera_coords, fov=(-45, 45), downsample=4):
+    bev_grid = np.transpose(bev_grid, (2,1,0))
+    bev_grid = cv2.dilate(bev_grid, np.ones((3,3), np.uint8), iterations=1)
+    i, j = camera_coords
+    visibility_grid = np.zeros_like(bev_grid).astype(np.uint8)
+    for theta in range(fov[0], fov[1]):
+        tan_theta = np.tan(theta * np.pi / 180)
+        for c in range(visibility_grid.shape[2]):
+            grid_c = bev_grid[:,:,c]
+            # shoot ray
+            for y in range(i, visibility_grid.shape[1]):
+                # compute the cell coords along the ray
+                # checking until the first cell that is 
+                # occupied is found
+                x = int(np.floor(tan_theta * (y - i) + j))
+                if x < 0 or x >= visibility_grid.shape[0]:
+                    break
+                if bev_grid[x, y, c] == 1:
+                    break
+                else:
+                    visibility_grid[x, y, c] |= 1
+    vg = visibility_grid.astype(np.float32)
+    ks1 = 3
+    ks2 = 3
+    kernel = np.ones((ks1,ks1), np.uint8)
+    vg = cv2.dilate(visibility_grid, kernel, iterations = 1)
+    vg = cv2.blur(vg, (ks2,ks2), 0)
+    vg = cv2.blur(vg, (ks2+1,ks2+1), 0)
+    vg = cv2.blur(vg, (ks2+2,ks2+2), 0)
+    return vg.transpose((2,1,0))
 
 class Depth2BEV:
   """
@@ -46,8 +78,8 @@ class Depth2BEV:
     self.pc_x_dim = pc_dims[0]
     self.pc_y_dim = pc_dims[1]
     self.pc_z_dim = pc_dims[2]
-    self.bev_x_dim = opt.view_dims['BEV'][0]
-    self.bev_y_dim = opt.view_dims['BEV'][1]
+    self.bev_x_dim = opt.view_dims['BEV'][0] # 3480
+    self.bev_y_dim = opt.view_dims['BEV'][1] # 2500
     self.grid_height_channels = opt.view_dims['BEV'][2]
     self.bev_z_res = pc_dims[2] / self.grid_height_channels
     self.fv_x_dim = opt.view_dims['FV'][0]
@@ -310,12 +342,13 @@ if __name__ == '__main__':
   #data = '/home/pemami/Workspace/3D-MOT-with-object-permanence/sample_data/train_seq_1_1'
   #max_depth, objects = Depth2BEV.parse_status(os.path.join(data, 'status.json'))
   #depth_data = np.float32(imread(os.path.join(data, 'depth', 'depth_030.png')))
-  depth2bev = Depth2BEV()
+  #depth2bev = Depth2BEV()
   #pc = depth2bev.depth_2_point_cloud(depth_data, max_depth)
   #bev, _ = depth2bev.point_cloud_2_BEV(pc)
   #print(bev.shape)
   #print(objects[29])
-  train_data_dir = '/media/pemami/DATA/intphys/train'
+  #train_data_dir = '/media/pemami/DATA/intphys/train'
+  train_data_dir = '/data/pemami/intphys/train'
   train_dirs = os.listdir(train_data_dir)
   #train_dirs = ['00009_block_O1_train']
   # for each sequence, grab the status.json and compute max depth and objects
@@ -325,29 +358,29 @@ if __name__ == '__main__':
     status = os.path.join(train_data_dir, f, 'status.json')
     max_depth, objects = Depth2BEV.parse_status(status)
     # write to txt file
-    annot_dir = os.path.join(train_data_dir, f, 'annotations')
+    annot_dir = os.path.join(train_data_dir, f, 'annotations-full')
     if not os.path.exists(annot_dir):
       os.mkdir(annot_dir)
     # get mask info from status
-    with open(status, 'r') as s:
-      ss = json.load(s) 
-      mask_list = ss['masks_grayscale']
-    object_masks = []
-    occluder_masks = []
-    for m in mask_list:
-      if "object" in m[1]:
-        object_masks.append(m[0])
-      elif "occluder" in m[1]:
-        occluder_masks.append(m[0])
+    #with open(status, 'r') as s:
+    #  ss = json.load(s) 
+    #  mask_list = ss['masks_grayscale']
+    #object_masks = []
+    #occluder_masks = []
+    #for m in mask_list:
+    #  if "object" in m[1]:
+    #    object_masks.append(m[0])
+    #  elif "occluder" in m[1]:
+    #    occluder_masks.append(m[0])
     for idx, frame in enumerate(objects):
       annot_file = os.path.join(annot_dir, '%03d.txt' %(idx+1)) 
       print(annot_file) 
-      if os.path.exists(annot_file):
-        os.remove(annot_file)
-      with open(annot_file, 'w') as annot:
+      #if os.path.exists(annot_file):
+      #  os.remove(annot_file)
+      with open(annot_file, 'w+') as annot:
         annot.write("{}\n".format(max_depth))
         # grab mask 
-        mask = imread(os.path.join(train_data_dir, f, 'mask', 'mask_%03d.png' %(idx+1)))
+        #mask = imread(os.path.join(train_data_dir, f, 'mask', 'mask_%03d.png' %(idx+1)))
         for o in frame:
           # Check occlusion
           # backproject to image coordinates
@@ -355,13 +388,13 @@ if __name__ == '__main__':
           # if mask label is wall and not an object, then skip bc occlusion
           
           # backprojection
-          u = int(np.rint(o[1] * depth2bev.fx / o[0]) + depth2bev.cx)
-          v = int(depth2bev.cy - np.rint(o[2] * depth2bev.fy / o[0]))
+         # u = int(np.rint(o[1] * depth2bev.fx / o[0]) + depth2bev.cx)
+         # v = int(depth2bev.cy - np.rint(o[2] * depth2bev.fy / o[0]))
           # check mask label
-          if 0 <= u < depth2bev.frame_width and 0 <= v < depth2bev.frame_height:
-            mask_label = mask[v, u]
-            if mask_label not in occluder_masks:
-                annot.write("{} {} {}\n".format(o[0], o[1], o[2]))
+          #if 0 <= u < depth2bev.frame_width and 0 <= v < depth2bev.frame_height:
+          #  mask_label = mask[v, u]
+          #  if mask_label not in occluder_masks:
+          annot.write("{} {} {}\n".format(o[0], o[1], o[2]))
 
     
 

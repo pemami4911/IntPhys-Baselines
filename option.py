@@ -12,6 +12,7 @@ def make(parser):
     parser.add_argument('--count', type=int, default=15000)
     parser.add_argument('--pattern', default='/mnt/20170407/train/%05d_block_O1_train',)
     parser.add_argument('--checkpoint', default='./checkpoints', help='path to checkpoint folder')
+    parser.add_argument('--results', default='./results', help='path to experiment logs/results folder')
     parser.add_argument('--n_frames', type=int, default=100, help='numbers of frames in videos')
     parser.add_argument('--bsz', type=int, default=2, help='batch size')
 
@@ -45,6 +46,8 @@ def make(parser):
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
     parser.add_argument('--beta1', type=float, default=0.5)
     parser.add_argument('--momentum', type=float, default=0.9)
+    parser.add_argument('--milestones', nargs='+', type=int, default=[1,2])
+    parser.add_argument('--lr_decay', type=float, default=0.1)
     parser.add_argument('--n_gpus', type=int, default=1)
 
     parser.add_argument('--load', action='append', type=lambda kv: kv.split("="), dest='load', help='Paths to trained models: for simple models use \"--load path/to/model.pth\", for GANs use \"--load netG=path/to/Generator.pth --load netD=path/to/Discriminator.pth')
@@ -92,9 +95,21 @@ def make(parser):
     parser.add_argument('--ball_radius', type=float, default=60)
     parser.add_argument('--normalize_regression', action='store_true', help='use mean and variance of regression data')
     parser.add_argument('--crop_sz', type=int, default=48)
-    parser.add_argument('--remove_no_objects', action='store_true', help='remove images without GT objects')
+    parser.add_argument('--remove_images_with_no_objects', action='store_true', help='remove images without GT objects')
     parser.add_argument('--disable_checkpoint', action='store_true')
     parser.add_argument('--gpu_id', type=int, default=0)
+    parser.add_argument('--visibility_grid', action='store_true', help='create and return the visibility grid')
+    # TODO: Delete?
+    parser.add_argument('--angular_thresh', nargs='+', type=int, default=[5, 10, 20], help='dist thresholds for computing statistics on spatial prior')
+    # TODO: update
+    parser.add_argument('--use_occluded', action='store_true')
+    parser.add_argument('--save_detections', action='store_true')
+    parser.add_argument('--random_flip', type=float, default=0.5, help='randomly flip 2D views vertically with probability')
+    parser.add_argument('--train_detections_file', type=str, default="")
+    parser.add_argument('--val_detections_file', type=str, default="")
+    parser.add_argument('--pretrained_bev', type=str, default="")
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--entropy_coeff', type=float, default=0.01)
 
     opt = parser.parse_args()
     
@@ -107,15 +122,18 @@ def make(parser):
     opt.input_len = len(opt.input_seq)
     opt.target_len = len(opt.target_seq)
 
-    if not opt.disable_checkpoint:
-        if opt.name.find('%d%d%d%d%d%d_%d%d%d%d%d%d') == -1:
-            append =  '_' + time.strftime('%y%m%d_%H%M%S')
-        else:
-            append = ''
-        if not os.path.isdir(opt.checkpoint):
-            print(opt.checkpoint, ' is not a valid directory! creating it!')
-            os.mkdir(opt.checkpoint)
-        opt.checkpoint = os.path.join(opt.checkpoint, opt.name + append)
+    if opt.name.find('%d%d%d%d%d%d_%d%d%d%d%d%d') == -1:
+        append =  '_' + time.strftime('%y%m%d_%H%M%S')
+    else:
+        append = ''
+    if not opt.disable_checkpoint and not os.path.isdir(opt.checkpoint):
+        print(opt.checkpoint, ' is not a valid directory! creating it!')
+        os.mkdir(opt.checkpoint)
+    opt.checkpoint = os.path.join(opt.checkpoint, opt.name + append)
+    opt.results = os.path.join(opt.results, opt.name + append)
+    if not opt.debug and not os.path.isdir(opt.results):
+        print(opt.results, ' is not a valid directory! creating it!')
+        os.mkdir(opt.results)
 
     opt.m = opt.n_frames - max(opt.input_seq[-1], opt.target_seq[-1]) - int(opt.residual) + 1
     opt.view_dims = {'BEV': opt.bev_dims, 'FV': opt.fv_dims}
